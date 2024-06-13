@@ -14,6 +14,7 @@
 
 package com.google.firebase.firestore;
 
+import static com.google.firebase.firestore.core.Query.LimitType.LIMIT_TO_LAST;
 import static com.google.firebase.firestore.util.Assert.fail;
 import static com.google.firebase.firestore.util.Assert.hardAssert;
 import static com.google.firebase.firestore.util.Preconditions.checkNotNull;
@@ -28,10 +29,10 @@ import com.google.firebase.firestore.FirebaseFirestoreException.Code;
 import com.google.firebase.firestore.core.ActivityScope;
 import com.google.firebase.firestore.core.AsyncEventListener;
 import com.google.firebase.firestore.core.Bound;
+import com.google.firebase.firestore.core.CompositeFilter;
 import com.google.firebase.firestore.core.EventManager.ListenOptions;
 import com.google.firebase.firestore.core.FieldFilter;
-import com.google.firebase.firestore.core.Filter;
-import com.google.firebase.firestore.core.Filter.Operator;
+import com.google.firebase.firestore.core.FieldFilter.Operator;
 import com.google.firebase.firestore.core.ListenerRegistrationImpl;
 import com.google.firebase.firestore.core.OrderBy;
 import com.google.firebase.firestore.core.QueryListener;
@@ -47,6 +48,7 @@ import com.google.firestore.v1.ArrayValue;
 import com.google.firestore.v1.Value;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
@@ -91,7 +93,7 @@ public class Query {
    */
   @NonNull
   public Query whereEqualTo(@NonNull String field, @Nullable Object value) {
-    return whereHelper(FieldPath.fromDotSeparatedPath(field), Operator.EQUAL, value);
+    return where(Filter.equalTo(field, value));
   }
 
   /**
@@ -104,7 +106,7 @@ public class Query {
    */
   @NonNull
   public Query whereEqualTo(@NonNull FieldPath fieldPath, @Nullable Object value) {
-    return whereHelper(fieldPath, Operator.EQUAL, value);
+    return where(Filter.equalTo(fieldPath, value));
   }
 
   /**
@@ -120,7 +122,7 @@ public class Query {
    */
   @NonNull
   public Query whereNotEqualTo(@NonNull String field, @Nullable Object value) {
-    return whereHelper(FieldPath.fromDotSeparatedPath(field), Operator.NOT_EQUAL, value);
+    return where(Filter.notEqualTo(field, value));
   }
 
   /**
@@ -136,7 +138,7 @@ public class Query {
    */
   @NonNull
   public Query whereNotEqualTo(@NonNull FieldPath fieldPath, @Nullable Object value) {
-    return whereHelper(fieldPath, Operator.NOT_EQUAL, value);
+    return where(Filter.notEqualTo(fieldPath, value));
   }
 
   /**
@@ -149,7 +151,7 @@ public class Query {
    */
   @NonNull
   public Query whereLessThan(@NonNull String field, @NonNull Object value) {
-    return whereHelper(FieldPath.fromDotSeparatedPath(field), Operator.LESS_THAN, value);
+    return where(Filter.lessThan(field, value));
   }
 
   /**
@@ -162,7 +164,7 @@ public class Query {
    */
   @NonNull
   public Query whereLessThan(@NonNull FieldPath fieldPath, @NonNull Object value) {
-    return whereHelper(fieldPath, Operator.LESS_THAN, value);
+    return where(Filter.lessThan(fieldPath, value));
   }
 
   /**
@@ -175,7 +177,7 @@ public class Query {
    */
   @NonNull
   public Query whereLessThanOrEqualTo(@NonNull String field, @NonNull Object value) {
-    return whereHelper(FieldPath.fromDotSeparatedPath(field), Operator.LESS_THAN_OR_EQUAL, value);
+    return where(Filter.lessThanOrEqualTo(field, value));
   }
 
   /**
@@ -188,7 +190,7 @@ public class Query {
    */
   @NonNull
   public Query whereLessThanOrEqualTo(@NonNull FieldPath fieldPath, @NonNull Object value) {
-    return whereHelper(fieldPath, Operator.LESS_THAN_OR_EQUAL, value);
+    return where(Filter.lessThanOrEqualTo(fieldPath, value));
   }
 
   /**
@@ -201,7 +203,7 @@ public class Query {
    */
   @NonNull
   public Query whereGreaterThan(@NonNull String field, @NonNull Object value) {
-    return whereHelper(FieldPath.fromDotSeparatedPath(field), Operator.GREATER_THAN, value);
+    return where(Filter.greaterThan(field, value));
   }
 
   /**
@@ -214,7 +216,7 @@ public class Query {
    */
   @NonNull
   public Query whereGreaterThan(@NonNull FieldPath fieldPath, @NonNull Object value) {
-    return whereHelper(fieldPath, Operator.GREATER_THAN, value);
+    return where(Filter.greaterThan(fieldPath, value));
   }
 
   /**
@@ -227,8 +229,7 @@ public class Query {
    */
   @NonNull
   public Query whereGreaterThanOrEqualTo(@NonNull String field, @NonNull Object value) {
-    return whereHelper(
-        FieldPath.fromDotSeparatedPath(field), Operator.GREATER_THAN_OR_EQUAL, value);
+    return where(Filter.greaterThanOrEqualTo(field, value));
   }
 
   /**
@@ -241,7 +242,7 @@ public class Query {
    */
   @NonNull
   public Query whereGreaterThanOrEqualTo(@NonNull FieldPath fieldPath, @NonNull Object value) {
-    return whereHelper(fieldPath, Operator.GREATER_THAN_OR_EQUAL, value);
+    return where(Filter.greaterThanOrEqualTo(fieldPath, value));
   }
 
   /**
@@ -258,7 +259,7 @@ public class Query {
    */
   @NonNull
   public Query whereArrayContains(@NonNull String field, @NonNull Object value) {
-    return whereHelper(FieldPath.fromDotSeparatedPath(field), Operator.ARRAY_CONTAINS, value);
+    return where(Filter.arrayContains(field, value));
   }
 
   /**
@@ -275,7 +276,7 @@ public class Query {
    */
   @NonNull
   public Query whereArrayContains(@NonNull FieldPath fieldPath, @NonNull Object value) {
-    return whereHelper(fieldPath, Operator.ARRAY_CONTAINS, value);
+    return where(Filter.arrayContains(fieldPath, value));
   }
 
   /**
@@ -293,7 +294,7 @@ public class Query {
   @NonNull
   public Query whereArrayContainsAny(
       @NonNull String field, @NonNull List<? extends Object> values) {
-    return whereHelper(FieldPath.fromDotSeparatedPath(field), Operator.ARRAY_CONTAINS_ANY, values);
+    return where(Filter.arrayContainsAny(field, values));
   }
 
   /**
@@ -311,7 +312,7 @@ public class Query {
   @NonNull
   public Query whereArrayContainsAny(
       @NonNull FieldPath fieldPath, @NonNull List<? extends Object> values) {
-    return whereHelper(fieldPath, Operator.ARRAY_CONTAINS_ANY, values);
+    return where(Filter.arrayContainsAny(fieldPath, values));
   }
 
   /**
@@ -327,7 +328,7 @@ public class Query {
    */
   @NonNull
   public Query whereIn(@NonNull String field, @NonNull List<? extends Object> values) {
-    return whereHelper(FieldPath.fromDotSeparatedPath(field), Operator.IN, values);
+    return where(Filter.inArray(field, values));
   }
 
   /**
@@ -343,7 +344,7 @@ public class Query {
    */
   @NonNull
   public Query whereIn(@NonNull FieldPath fieldPath, @NonNull List<? extends Object> values) {
-    return whereHelper(fieldPath, Operator.IN, values);
+    return where(Filter.inArray(fieldPath, values));
   }
 
   /**
@@ -364,7 +365,7 @@ public class Query {
    */
   @NonNull
   public Query whereNotIn(@NonNull String field, @NonNull List<? extends Object> values) {
-    return whereHelper(FieldPath.fromDotSeparatedPath(field), Operator.NOT_IN, values);
+    return where(Filter.notInArray(field, values));
   }
 
   /**
@@ -385,19 +386,38 @@ public class Query {
    */
   @NonNull
   public Query whereNotIn(@NonNull FieldPath fieldPath, @NonNull List<? extends Object> values) {
-    return whereHelper(fieldPath, Operator.NOT_IN, values);
+    return where(Filter.notInArray(fieldPath, values));
   }
 
   /**
-   * Creates and returns a new {@code Query} with the additional filter that documents must contain
-   * the specified field and the value should satisfy the relation constraint provided.
+   * Creates and returns a new {@code Query} with the additional filter.
    *
-   * @param fieldPath The field to compare
-   * @param op The operator
-   * @param value The value for comparison
-   * @return The created {@code Query}.
+   * @param filter The new filter to apply to the existing query.
+   * @return The newly created {@code Query}.
    */
-  private Query whereHelper(@NonNull FieldPath fieldPath, Operator op, Object value) {
+  @NonNull
+  public Query where(@NonNull Filter filter) {
+    com.google.firebase.firestore.core.Filter parsedFilter = parseFilter(filter);
+    if (parsedFilter.getFilters().isEmpty()) {
+      // Return the existing query if not adding any more filters (because composite filter is
+      // empty).
+      return this;
+    }
+    validateNewFilter(parsedFilter);
+    return new Query(query.filter(parsedFilter), firestore);
+  }
+
+  /**
+   * Takes a {@link Filter.UnaryFilter} object, parses the value object and returns a new {@link
+   * FieldFilter} for the field, operator, and parsed value.
+   *
+   * @param fieldFilterData The Filter.UnaryFilter object to parse.
+   * @return The created {@link FieldFilter}.
+   */
+  private FieldFilter parseFieldFilter(Filter.UnaryFilter fieldFilterData) {
+    FieldPath fieldPath = fieldFilterData.getField();
+    Operator op = fieldFilterData.getOperator();
+    Object value = fieldFilterData.getValue();
     checkNotNull(fieldPath, "Provided field path must not be null.");
     checkNotNull(op, "Provided op must not be null.");
     Value fieldValue;
@@ -427,17 +447,44 @@ public class Query {
               .getUserDataReader()
               .parseQueryValue(value, op == Operator.IN || op == Operator.NOT_IN);
     }
-    Filter filter = FieldFilter.create(fieldPath.getInternalPath(), op, fieldValue);
-    validateNewFilter(filter);
-    return new Query(query.filter(filter), firestore);
+    FieldFilter filter = FieldFilter.create(fieldPath.getInternalPath(), op, fieldValue);
+    return filter;
   }
 
-  private void validateOrderByField(com.google.firebase.firestore.model.FieldPath field) {
-    com.google.firebase.firestore.model.FieldPath inequalityField = query.inequalityField();
-    if (query.getFirstOrderByField() == null && inequalityField != null) {
-
-      validateOrderByFieldMatchesInequality(field, inequalityField);
+  /**
+   * Takes a {@link Filter.CompositeFilter} object, parses each of its subfilters, and returns a new
+   * {@link Filter} that is constructed using the parsed values.
+   */
+  private com.google.firebase.firestore.core.Filter parseCompositeFilter(
+      Filter.CompositeFilter compositeFilterData) {
+    List<com.google.firebase.firestore.core.Filter> parsedFilters = new ArrayList<>();
+    for (Filter filter : compositeFilterData.getFilters()) {
+      com.google.firebase.firestore.core.Filter parsedFilter = parseFilter(filter);
+      if (!parsedFilter.getFilters().isEmpty()) {
+        parsedFilters.add(parsedFilter);
+      }
     }
+
+    // For composite filters containing 1 filter, return the only filter.
+    // For example: AND(FieldFilter1) == FieldFilter1
+    if (parsedFilters.size() == 1) {
+      return parsedFilters.get(0);
+    }
+    return new CompositeFilter(parsedFilters, compositeFilterData.getOperator());
+  }
+
+  /**
+   * Takes a filter whose value has not been parsed, parses the value object and returns a
+   * FieldFilter or CompositeFilter with parsed values.
+   */
+  private com.google.firebase.firestore.core.Filter parseFilter(Filter filter) {
+    hardAssert(
+        filter instanceof Filter.UnaryFilter || filter instanceof Filter.CompositeFilter,
+        "Parsing is only supported for Filter.UnaryFilter and Filter.CompositeFilter.");
+    if (filter instanceof Filter.UnaryFilter) {
+      return parseFieldFilter((Filter.UnaryFilter) filter);
+    }
+    return parseCompositeFilter((Filter.CompositeFilter) filter);
   }
 
   /**
@@ -487,105 +534,83 @@ public class Query {
       throw new IllegalArgumentException(
           "Invalid Query. A non-empty array is required for '" + op.toString() + "' filters.");
     }
-    if (((List) value).size() > 10) {
-      throw new IllegalArgumentException(
-          "Invalid Query. '"
-              + op.toString()
-              + "' filters support a maximum of 10 elements in the value array.");
-    }
-  }
-
-  private void validateOrderByFieldMatchesInequality(
-      com.google.firebase.firestore.model.FieldPath orderBy,
-      com.google.firebase.firestore.model.FieldPath inequality) {
-    if (!orderBy.equals(inequality)) {
-      String inequalityString = inequality.canonicalString();
-      throw new IllegalArgumentException(
-          String.format(
-              "Invalid query. You have an inequality where filter (whereLessThan(), "
-                  + "whereGreaterThan(), etc.) on field '%s' and so you must also have '%s' as "
-                  + "your first orderBy() field, but your first orderBy() is currently on field "
-                  + "'%s' instead.",
-              inequalityString, inequalityString, orderBy.canonicalString()));
-    }
   }
 
   /**
    * Given an operator, returns the set of operators that cannot be used with it.
    *
+   * <p>This is not a comprehensive check, and this function should be removed in the long term.
+   * Validations should occur in the Firestore backend.
+   *
    * <p>Operators in a query must adhere to the following set of rules:
    *
    * <ol>
-   *   <li>Only one array operator is allowed.
-   *   <li>Only one disjunctive operator is allowed.
-   *   <li>NOT_EQUAL cannot be used with another NOT_EQUAL operator.
+   *   <li>Only one inequality per query.
    *   <li>NOT_IN cannot be used with array, disjunctive, or NOT_EQUAL operators.
    * </ol>
-   *
-   * <p>Array operators: ARRAY_CONTAINS, ARRAY_CONTAINS_ANY Disjunctive operators: IN,
-   * ARRAY_CONTAINS_ANY, NOT_IN
    */
   private List<Operator> conflictingOps(Operator op) {
     switch (op) {
       case NOT_EQUAL:
         return Arrays.asList(Operator.NOT_EQUAL, Operator.NOT_IN);
-      case ARRAY_CONTAINS:
-        return Arrays.asList(Operator.ARRAY_CONTAINS, Operator.ARRAY_CONTAINS_ANY, Operator.NOT_IN);
-      case IN:
-        return Arrays.asList(Operator.ARRAY_CONTAINS_ANY, Operator.IN, Operator.NOT_IN);
       case ARRAY_CONTAINS_ANY:
-        return Arrays.asList(
-            Operator.ARRAY_CONTAINS, Operator.ARRAY_CONTAINS_ANY, Operator.IN, Operator.NOT_IN);
+      case IN:
+        return Arrays.asList(Operator.NOT_IN);
       case NOT_IN:
         return Arrays.asList(
-            Operator.ARRAY_CONTAINS,
-            Operator.ARRAY_CONTAINS_ANY,
-            Operator.IN,
-            Operator.NOT_IN,
-            Operator.NOT_EQUAL);
+            Operator.ARRAY_CONTAINS_ANY, Operator.IN, Operator.NOT_IN, Operator.NOT_EQUAL);
       default:
         return new ArrayList<>();
     }
   }
 
-  private void validateNewFilter(Filter filter) {
-    if (filter instanceof FieldFilter) {
-      FieldFilter fieldFilter = (FieldFilter) filter;
-      Operator filterOp = fieldFilter.getOperator();
-      if (fieldFilter.isInequality()) {
-        com.google.firebase.firestore.model.FieldPath existingInequality = query.inequalityField();
-        com.google.firebase.firestore.model.FieldPath newInequality = filter.getField();
+  /** Checks that adding the given field filter to the given query yields a valid query */
+  private void validateNewFieldFilter(
+      com.google.firebase.firestore.core.Query query,
+      com.google.firebase.firestore.core.FieldFilter fieldFilter) {
+    Operator filterOp = fieldFilter.getOperator();
 
-        if (existingInequality != null && !existingInequality.equals(newInequality)) {
-          throw new IllegalArgumentException(
-              String.format(
-                  "All where filters with an inequality (notEqualTo, notIn, lessThan, "
-                      + "lessThanOrEqualTo, greaterThan, or greaterThanOrEqualTo) must be on the "
-                      + "same field. But you have filters on '%s' and '%s'",
-                  existingInequality.canonicalString(), newInequality.canonicalString()));
-        }
-        com.google.firebase.firestore.model.FieldPath firstOrderByField =
-            query.getFirstOrderByField();
-        if (firstOrderByField != null) {
-          validateOrderByFieldMatchesInequality(firstOrderByField, newInequality);
-        }
+    Operator conflictingOp = findOpInsideFilters(query.getFilters(), conflictingOps(filterOp));
+    if (conflictingOp != null) {
+      // We special case when it's a duplicate op to give a slightly clearer error message.
+      if (conflictingOp == filterOp) {
+        throw new IllegalArgumentException(
+            "Invalid Query. You cannot use more than one '" + filterOp.toString() + "' filter.");
+      } else {
+        throw new IllegalArgumentException(
+            "Invalid Query. You cannot use '"
+                + filterOp.toString()
+                + "' filters with '"
+                + conflictingOp.toString()
+                + "' filters.");
       }
-      Operator conflictingOp = query.findFilterOperator(conflictingOps(filterOp));
-      if (conflictingOp != null) {
-        // We special case when it's a duplicate op to give a slightly clearer error message.
-        if (conflictingOp == filterOp) {
-          throw new IllegalArgumentException(
-              "Invalid Query. You cannot use more than one '" + filterOp.toString() + "' filter.");
-        } else {
-          throw new IllegalArgumentException(
-              "Invalid Query. You cannot use '"
-                  + filterOp.toString()
-                  + "' filters with '"
-                  + conflictingOp.toString()
-                  + "' filters.");
+    }
+  }
+
+  /** Checks that adding the given filter to the current query is valid */
+  private void validateNewFilter(com.google.firebase.firestore.core.Filter filter) {
+    com.google.firebase.firestore.core.Query testQuery = query;
+    for (FieldFilter subfilter : filter.getFlattenedFilters()) {
+      validateNewFieldFilter(testQuery, subfilter);
+      testQuery = testQuery.filter(subfilter);
+    }
+  }
+
+  /**
+   * Checks if any of the provided filter operators are included in the given list of filters and
+   * returns the first one that is, or null if none are.
+   */
+  @Nullable
+  private Operator findOpInsideFilters(
+      List<com.google.firebase.firestore.core.Filter> filters, List<Operator> operators) {
+    for (com.google.firebase.firestore.core.Filter filter : filters) {
+      for (FieldFilter fieldFilter : filter.getFlattenedFilters()) {
+        if (operators.contains(fieldFilter.getOperator())) {
+          return fieldFilter.getOperator();
         }
       }
     }
+    return null;
   }
 
   /**
@@ -652,7 +677,6 @@ public class Query {
           "Invalid query. You must not call Query.endAt() or Query.endBefore() before "
               + "calling Query.orderBy().");
     }
-    validateOrderByField(fieldPath);
     OrderBy.Direction dir =
         direction == Direction.ASCENDING
             ? OrderBy.Direction.ASCENDING
@@ -834,7 +858,7 @@ public class Query {
     // contain the document key. That way the position becomes unambiguous and the query
     // continues/ends exactly at the provided document. Without the key (by using the explicit sort
     // orders), multiple documents could match the position, yielding duplicate results.
-    for (OrderBy orderBy : query.getOrderBy()) {
+    for (OrderBy orderBy : query.getNormalizedOrderBy()) {
       if (orderBy.getField().equals(com.google.firebase.firestore.model.FieldPath.KEY_PATH)) {
         components.add(Values.refValue(firestore.getDatabaseId(), document.getKey()));
       } else {
@@ -1047,7 +1071,7 @@ public class Query {
   /**
    * Starts listening to this query with the given options.
    *
-   * @param metadataChanges Indicates whether metadata-only changes (i.e. only {@code
+   * @param metadataChanges Indicates whether metadata-only changes (specifically, only {@code
    *     QuerySnapshot.getMetadata()} changed) should trigger snapshot events.
    * @param listener The event listener that will be called with the snapshots.
    * @return A registration object that can be used to remove the listener.
@@ -1062,7 +1086,7 @@ public class Query {
    * Starts listening to this query with the given options.
    *
    * @param executor The executor to use to call the listener.
-   * @param metadataChanges Indicates whether metadata-only changes (i.e. only {@code
+   * @param metadataChanges Indicates whether metadata-only changes (specifically, only {@code
    *     QuerySnapshot.getMetadata()} changed) should trigger snapshot events.
    * @param listener The event listener that will be called with the snapshots.
    * @return A registration object that can be used to remove the listener.
@@ -1084,7 +1108,7 @@ public class Query {
    * <p>The listener will be automatically removed during {@link Activity#onStop}.
    *
    * @param activity The activity to scope the listener to.
-   * @param metadataChanges Indicates whether metadata-only changes (i.e. only {@code
+   * @param metadataChanges Indicates whether metadata-only changes (specifically, only {@code
    *     QuerySnapshot.getMetadata()} changed) should trigger snapshot events.
    * @param listener The event listener that will be called with the snapshots.
    * @return A registration object that can be used to remove the listener.
@@ -1099,6 +1123,27 @@ public class Query {
     checkNotNull(listener, "Provided EventListener must not be null.");
     return addSnapshotListenerInternal(
         Executors.DEFAULT_CALLBACK_EXECUTOR, internalOptions(metadataChanges), activity, listener);
+  }
+
+  /**
+   * Starts listening to this query with the given options.
+   *
+   * @param options Sets snapshot listener options, including whether metadata-only changes should
+   *     trigger snapshot events, the source to listen to, the executor to use to call the listener,
+   *     or the activity to scope the listener to.
+   * @param listener The event listener that will be called with the snapshots.
+   * @return A registration object that can be used to remove the listener.
+   */
+  @NonNull
+  public ListenerRegistration addSnapshotListener(
+      @NonNull SnapshotListenOptions options, @NonNull EventListener<QuerySnapshot> listener) {
+    checkNotNull(options, "Provided options value must not be null.");
+    checkNotNull(listener, "Provided EventListener must not be null.");
+    return addSnapshotListenerInternal(
+        options.getExecutor(),
+        internalOptions(options.getMetadataChanges(), options.getSource()),
+        options.getActivity(),
+        listener);
   }
 
   /**
@@ -1144,10 +1189,52 @@ public class Query {
   }
 
   private void validateHasExplicitOrderByForLimitToLast() {
-    if (query.hasLimitToLast() && query.getExplicitOrderBy().isEmpty()) {
+    if (query.getLimitType().equals(LIMIT_TO_LAST) && query.getExplicitOrderBy().isEmpty()) {
       throw new IllegalStateException(
           "limitToLast() queries require specifying at least one orderBy() clause");
     }
+  }
+
+  /**
+   * Returns a query that counts the documents in the result set of this query.
+   *
+   * <p>The returned query, when executed, counts the documents in the result set of this query
+   * <em>without actually downloading the documents</em>.
+   *
+   * <p>Using the returned query to count the documents is efficient because only the final count,
+   * not the documents' data, is downloaded. The returned query can count the documents in cases
+   * where the result set is prohibitively large to download entirely (thousands of documents).
+   *
+   * @return The {@code AggregateQuery} that counts the documents in the result set of this query.
+   */
+  @NonNull
+  public AggregateQuery count() {
+    return new AggregateQuery(this, Collections.singletonList(AggregateField.count()));
+  }
+
+  /**
+   * Calculates the specified aggregations over the documents in the result set of the given query
+   * without actually downloading the documents.
+   *
+   * <p>Using the returned query to perform aggregations is efficient because only the final
+   * aggregation values, not the documents' data, is downloaded. The returned query can perform
+   * aggregations of the documents in cases where the result set is prohibitively large to download
+   * entirely (thousands of documents).
+   *
+   * @return The {@code AggregateQuery} that performs aggregations on the documents in the result
+   *     set of this query.
+   */
+  @NonNull
+  public AggregateQuery aggregate(
+      @NonNull AggregateField aggregateField, @NonNull AggregateField... aggregateFields) {
+    List<AggregateField> fields =
+        new ArrayList<AggregateField>() {
+          {
+            add(aggregateField);
+          }
+        };
+    fields.addAll(Arrays.asList(aggregateFields));
+    return new AggregateQuery(this, fields);
   }
 
   @Override
@@ -1173,10 +1260,16 @@ public class Query {
 
   /** Converts the public API options object to the internal options object. */
   private static ListenOptions internalOptions(MetadataChanges metadataChanges) {
+    return internalOptions(metadataChanges, ListenSource.DEFAULT);
+  }
+
+  private static ListenOptions internalOptions(
+      MetadataChanges metadataChanges, ListenSource source) {
     ListenOptions internalOptions = new ListenOptions();
     internalOptions.includeDocumentMetadataChanges = (metadataChanges == MetadataChanges.INCLUDE);
     internalOptions.includeQueryMetadataChanges = (metadataChanges == MetadataChanges.INCLUDE);
     internalOptions.waitForSyncWhenOnline = false;
+    internalOptions.source = source;
     return internalOptions;
   }
 }

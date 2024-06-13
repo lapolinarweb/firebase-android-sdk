@@ -108,9 +108,19 @@ public final class DocumentKey implements Comparable<DocumentKey> {
     return path;
   }
 
-  /** Returns the collection group (i.e. the name of the parent collection) for this key. */
+  /** Returns the collection group (that is, the name of the parent collection) for this key. */
   public String getCollectionGroup() {
     return path.getSegment(path.length() - 2);
+  }
+
+  /** Returns the fully qualified path to the parent collection. */
+  public ResourcePath getCollectionPath() {
+    return path.popLast();
+  }
+
+  /** Returns the ID for this document key (that is, the last path segment). */
+  public String getDocumentId() {
+    return path.getLastSegment();
   }
 
   /** Returns true if the document is in the specified collectionId. */

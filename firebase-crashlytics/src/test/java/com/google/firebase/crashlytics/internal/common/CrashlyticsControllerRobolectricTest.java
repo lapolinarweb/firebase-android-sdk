@@ -30,13 +30,17 @@ import androidx.annotation.NonNull;
 import androidx.test.core.app.ApplicationProvider;
 import com.google.firebase.crashlytics.internal.CrashlyticsNativeComponent;
 import com.google.firebase.crashlytics.internal.CrashlyticsNativeComponentDeferredProxy;
+import com.google.firebase.crashlytics.internal.DevelopmentPlatformProvider;
 import com.google.firebase.crashlytics.internal.analytics.AnalyticsEventLogger;
-import com.google.firebase.crashlytics.internal.log.LogFileManager;
+import com.google.firebase.crashlytics.internal.metadata.LogFileManager;
+import com.google.firebase.crashlytics.internal.metadata.UserMetadata;
 import com.google.firebase.crashlytics.internal.persistence.FileStore;
-import com.google.firebase.crashlytics.internal.settings.SettingsDataProvider;
-import com.google.firebase.crashlytics.internal.settings.model.FeaturesSettingsData;
-import com.google.firebase.crashlytics.internal.settings.model.Settings;
+import com.google.firebase.crashlytics.internal.settings.Settings;
+import com.google.firebase.crashlytics.internal.settings.Settings.FeatureFlagData;
+import com.google.firebase.crashlytics.internal.settings.Settings.SessionData;
+import com.google.firebase.crashlytics.internal.settings.SettingsProvider;
 import com.google.firebase.inject.Deferred;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.TreeSet;
@@ -50,10 +54,11 @@ import org.robolectric.RobolectricTestRunner;
 @RunWith(RobolectricTestRunner.class)
 public class CrashlyticsControllerRobolectricTest {
   private static final String GOOGLE_APP_ID = "google:app:id";
+  private static final String SESSION_ID = "session_id";
 
   private Context testContext;
   @Mock private IdManager idManager;
-  @Mock private SettingsDataProvider mockSettingsDataProvider;
+  @Mock private SettingsProvider mockSettingsProvider;
   @Mock private FileStore testFileStore;
   @Mock private SessionReportingCoordinator mockSessionReportingCoordinator;
   @Mock private DataCollectionArbiter mockDataCollectionArbiter;
@@ -70,7 +75,7 @@ public class CrashlyticsControllerRobolectricTest {
 
   @Before
   public void setUp() {
-    MockitoAnnotations.initMocks(this);
+    MockitoAnnotations.openMocks(this);
     testContext = getApplicationContext();
     testFileStore = new FileStore(testContext);
   }
@@ -82,8 +87,8 @@ public class CrashlyticsControllerRobolectricTest {
 
     when(mockSessionReportingCoordinator.listSortedOpenSessionIds())
         .thenReturn(new TreeSet<>(Collections.singletonList(sessionId)));
-    mockSettingsData(true);
-    controller.doCloseSessions(mockSettingsDataProvider);
+    mockSettingsProvider(true, false);
+    controller.doCloseSessions(mockSettingsProvider);
     // Since we haven't added any app exit info to the shadow activity manager, there won't exist a
     // single app exit info, and so this method won't be called.
     verify(mockSessionReportingCoordinator, never())
@@ -103,8 +108,8 @@ public class CrashlyticsControllerRobolectricTest {
 
     when(mockSessionReportingCoordinator.listSortedOpenSessionIds())
         .thenReturn(new TreeSet<>(Collections.singletonList(sessionId)));
-    mockSettingsData(true);
-    controller.doCloseSessions(mockSettingsDataProvider);
+    mockSettingsProvider(true, false);
+    controller.doCloseSessions(mockSettingsProvider);
     verify(mockSessionReportingCoordinator)
         .persistRelevantAppExitInfoEvent(
             eq(sessionId),
@@ -120,31 +125,41 @@ public class CrashlyticsControllerRobolectricTest {
 
     when(mockSessionReportingCoordinator.listSortedOpenSessionIds())
         .thenReturn(new TreeSet<>(Collections.singletonList(sessionId)));
-    mockSettingsData(false);
-    controller.doCloseSessions(mockSettingsDataProvider);
+    mockSettingsProvider(false, false);
+    controller.doCloseSessions(mockSettingsProvider);
     verify(mockSessionReportingCoordinator, never())
         .persistRelevantAppExitInfoEvent(
             eq(sessionId), any(), any(LogFileManager.class), any(UserMetadata.class));
   }
 
-  private void mockSettingsData(boolean collectAnrs) {
-    Settings mockSettings = mock(Settings.class);
-    when(mockSettingsDataProvider.getSettings()).thenReturn(mockSettings);
-    when(mockSettings.getFeaturesData()).thenReturn(new FeaturesSettingsData(true, collectAnrs));
+  private void mockSettingsProvider(boolean collectAnrs, boolean collectBuildIds) {
+    Settings settings =
+        new Settings(
+            0,
+            new SessionData(4, 4),
+            new FeatureFlagData(true, collectAnrs, collectBuildIds),
+            3,
+            0,
+            1.0,
+            1.0,
+            1);
+    when(mockSettingsProvider.getSettingsSync()).thenReturn(settings);
   }
 
   /** Creates a new CrashlyticsController with default options and opens a session. */
   private CrashlyticsController createController() {
+    List<BuildIdInfo> buildIdInfoList = new ArrayList<>();
+    buildIdInfoList.add(new BuildIdInfo("lib.so", "x86", "aabb"));
     AppData appData =
         new AppData(
             GOOGLE_APP_ID,
             "buildId",
+            buildIdInfoList,
             "installerPackageName",
             "packageName",
             "versionCode",
             "versionName",
-            /*developmentPlatform=*/ null,
-            /*developmentPlatformVersion=*/ null);
+            mock(DevelopmentPlatformProvider.class));
 
     final CrashlyticsController controller =
         new CrashlyticsController(
@@ -159,8 +174,9 @@ public class CrashlyticsControllerRobolectricTest {
             null,
             mockSessionReportingCoordinator,
             MISSING_NATIVE_COMPONENT,
-            mock(AnalyticsEventLogger.class));
-    controller.openSession();
+            mock(AnalyticsEventLogger.class),
+            mock(CrashlyticsAppQualitySessionsSubscriber.class));
+    controller.openSession(SESSION_ID);
     return controller;
   }
 

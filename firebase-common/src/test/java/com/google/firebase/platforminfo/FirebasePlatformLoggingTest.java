@@ -39,6 +39,7 @@ public class FirebasePlatformLoggingTest {
           .build();
 
   @Test
+  @Config(sdk = Build.VERSION_CODES.O)
   public void test_tv_atHighEnoughApiLevel() {
     ShadowPackageManager shadowPackageManager =
         shadowOf(ApplicationProvider.getApplicationContext().getPackageManager());
@@ -54,6 +55,7 @@ public class FirebasePlatformLoggingTest {
   }
 
   @Test
+  @Config(sdk = Build.VERSION_CODES.O)
   public void test_watch_atHighEnoughApiLevel() {
     ShadowPackageManager shadowPackageManager =
         shadowOf(ApplicationProvider.getApplicationContext().getPackageManager());
@@ -69,22 +71,7 @@ public class FirebasePlatformLoggingTest {
   }
 
   @Test
-  @Config(sdk = Build.VERSION_CODES.KITKAT)
-  public void test_watch_atNotHighEnoughApiLevel() {
-    ShadowPackageManager shadowPackageManager =
-        shadowOf(ApplicationProvider.getApplicationContext().getPackageManager());
-    shadowPackageManager.setSystemFeature(PackageManager.FEATURE_WATCH, true);
-    withApp(
-        "myApp",
-        OPTIONS,
-        app -> {
-          UserAgentPublisher ua = app.get(UserAgentPublisher.class);
-
-          assertThat(ua.getUserAgent()).containsMatch(Pattern.compile("android-platform/($|\\s)"));
-        });
-  }
-
-  @Test
+  @Config(sdk = Build.VERSION_CODES.O)
   public void test_auto_atHighEnoughApiLevel() {
     ShadowPackageManager shadowPackageManager =
         shadowOf(ApplicationProvider.getApplicationContext().getPackageManager());
@@ -116,6 +103,7 @@ public class FirebasePlatformLoggingTest {
   }
 
   @Test
+  @Config(sdk = Build.VERSION_CODES.O)
   public void test_embedded_atHighEnoughApiLevel() {
     ShadowPackageManager shadowPackageManager =
         shadowOf(ApplicationProvider.getApplicationContext().getPackageManager());
@@ -147,6 +135,7 @@ public class FirebasePlatformLoggingTest {
   }
 
   @Test
+  @Config(sdk = Build.VERSION_CODES.O)
   public void test_installerPackage_withNoInstallerSet() {
     withApp(
         "myApp",
@@ -159,6 +148,7 @@ public class FirebasePlatformLoggingTest {
   }
 
   @Test
+  @Config(sdk = Build.VERSION_CODES.O)
   public void test_installerPackage_withInstallerSet() {
 
     String installer = "com/example store";

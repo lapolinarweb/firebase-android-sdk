@@ -17,6 +17,7 @@ package com.google.firebase.firestore;
 import static com.google.firebase.firestore.util.Assert.hardAssert;
 import static com.google.firebase.firestore.util.Preconditions.checkNotNull;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.Context;
 import androidx.annotation.Keep;
@@ -27,7 +28,8 @@ import com.google.android.gms.tasks.Task;
 import com.google.android.gms.tasks.TaskCompletionSource;
 import com.google.android.gms.tasks.Tasks;
 import com.google.firebase.FirebaseApp;
-import com.google.firebase.appcheck.interop.InternalAppCheckTokenProvider;
+import com.google.firebase.annotations.PreviewApi;
+import com.google.firebase.appcheck.interop.InteropAppCheckTokenProvider;
 import com.google.firebase.auth.internal.InternalAuthProvider;
 import com.google.firebase.emulators.EmulatedServiceSettings;
 import com.google.firebase.firestore.FirebaseFirestoreException.Code;
@@ -52,6 +54,7 @@ import com.google.firebase.firestore.util.Executors;
 import com.google.firebase.firestore.util.Function;
 import com.google.firebase.firestore.util.Logger;
 import com.google.firebase.firestore.util.Logger.Level;
+import com.google.firebase.firestore.util.Preconditions;
 import com.google.firebase.inject.Deferred;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
@@ -101,24 +104,74 @@ public class FirebaseFirestore {
   private volatile FirestoreClient client;
   private final GrpcMetadataProvider metadataProvider;
 
+  @Nullable private PersistentCacheIndexManager persistentCacheIndexManager;
+
   @NonNull
-  public static FirebaseFirestore getInstance() {
+  private static FirebaseApp getDefaultFirebaseApp() {
     FirebaseApp app = FirebaseApp.getInstance();
     if (app == null) {
       throw new IllegalStateException("You must call FirebaseApp.initializeApp first.");
     }
-    return getInstance(app, DatabaseId.DEFAULT_DATABASE_ID);
+    return app;
   }
 
+  /**
+   * Returns the default {@link FirebaseFirestore} instance for the default {@link FirebaseApp}.
+   *
+   * <p>Returns the same instance for all invocations. If no instance exists, initializes a new
+   * instance.
+   *
+   * @returns The {@link FirebaseFirestore} instance.
+   */
+  @NonNull
+  public static FirebaseFirestore getInstance() {
+    return getInstance(getDefaultFirebaseApp(), DatabaseId.DEFAULT_DATABASE_ID);
+  }
+
+  /**
+   * Returns the default {@link FirebaseFirestore} instance for the provided {@link FirebaseApp}.
+   *
+   * <p>For a given {@link FirebaseApp}, invocation always returns the same instance. If no instance
+   * exists, initializes a new instance.
+   *
+   * @param app The {@link FirebaseApp} instance that the returned {@link FirebaseFirestore}
+   *     instance is associated with.
+   * @returns The {@link FirebaseFirestore} instance.
+   */
   @NonNull
   public static FirebaseFirestore getInstance(@NonNull FirebaseApp app) {
     return getInstance(app, DatabaseId.DEFAULT_DATABASE_ID);
   }
 
-  // TODO: make this public
+  /**
+   * Returns the {@link FirebaseFirestore} instance for the default {@link FirebaseApp}.
+   *
+   * <p>Returns the same instance for all invocations given the same database parameter. If no
+   * instance exists, initializes a new instance.
+   *
+   * @param database The database ID.
+   * @returns The {@link FirebaseFirestore} instance.
+   */
   @NonNull
-  private static FirebaseFirestore getInstance(@NonNull FirebaseApp app, @NonNull String database) {
+  public static FirebaseFirestore getInstance(@NonNull String database) {
+    return getInstance(getDefaultFirebaseApp(), database);
+  }
+
+  /**
+   * Returns the {@link FirebaseFirestore} instance for the provided {@link FirebaseApp}.
+   *
+   * <p>Returns the same instance for all invocations given the same {@link FirebaseApp} and
+   * database parameter. If no instance exists, initializes a new instance.
+   *
+   * @param app The {@link FirebaseApp} instance that the returned {@link FirebaseFirestore}
+   *     instance is associated with.
+   * @param database The database ID.
+   * @returns The {@link FirebaseFirestore} instance.
+   */
+  @NonNull
+  public static FirebaseFirestore getInstance(@NonNull FirebaseApp app, @NonNull String database) {
     checkNotNull(app, "Provided FirebaseApp must not be null.");
+    checkNotNull(database, "Provided database name must not be null.");
     FirestoreMultiDbComponent component = app.get(FirestoreMultiDbComponent.class);
     checkNotNull(component, "Firestore component is not present.");
     return component.get(database);
@@ -129,7 +182,7 @@ public class FirebaseFirestore {
       @NonNull Context context,
       @NonNull FirebaseApp app,
       @NonNull Deferred<InternalAuthProvider> deferredAuthProvider,
-      @NonNull Deferred<InternalAppCheckTokenProvider> deferredAppCheckTokenProvider,
+      @NonNull Deferred<InteropAppCheckTokenProvider> deferredAppCheckTokenProvider,
       @NonNull String database,
       @NonNull InstanceRegistry instanceRegistry,
       @Nullable GrpcMetadataProvider metadataProvider) {
@@ -289,7 +342,7 @@ public class FirebaseFirestore {
   }
 
   /**
-   * Configures Indexing for local query execution. Any previous index configuration is overridden.
+   * Configures indexing for local query execution. Any previous index configuration is overridden.
    * The Task resolves once the index configuration has been persisted.
    *
    * <p>The index entries themselves are created asynchronously. You can continue to use queries
@@ -302,15 +355,19 @@ public class FirebaseFirestore {
    * @param json The JSON format exported by the Firebase CLI.
    * @return A task that resolves once all indices are successfully configured.
    * @throws IllegalArgumentException if the JSON format is invalid
+   * @deprecated Instead of creating cache indexes manually, consider using {@link
+   *     PersistentCacheIndexManager#enableIndexAutoCreation()} to let the SDK decide whether to
+   *     create cache indexes for queries running locally.
    */
-  @VisibleForTesting
-  Task<Void> setIndexConfiguration(String json) {
+  @Deprecated
+  @PreviewApi
+  @NonNull
+  public Task<Void> setIndexConfiguration(@NonNull String json) {
     ensureClientConfigured();
+    Preconditions.checkState(
+        settings.isPersistenceEnabled(), "Cannot enable indexes when persistence is disabled");
 
-    // Preconditions.checkState(BuildConfig.ENABLE_INDEXING, "Indexing support is not yet
-    // available.");
-
-    List<FieldIndex> parsedIndices = new ArrayList<>();
+    List<FieldIndex> parsedIndexes = new ArrayList<>();
 
     // See https://firebase.google.com/docs/reference/firestore/indexes/#json_format for the
     // format of the index definition. Unlike the backend, the SDK does not distinguish between
@@ -320,9 +377,9 @@ public class FirebaseFirestore {
       JSONObject jsonObject = new JSONObject(json);
 
       if (jsonObject.has("indexes")) {
-        JSONArray indices = jsonObject.getJSONArray("indexes");
-        for (int i = 0; i < indices.length(); ++i) {
-          JSONObject definition = indices.getJSONObject(i);
+        JSONArray indexes = jsonObject.getJSONArray("indexes");
+        for (int i = 0; i < indexes.length(); ++i) {
+          JSONObject definition = indexes.getJSONObject(i);
           String collectionGroup = definition.getString("collectionGroup");
           List<FieldIndex.Segment> segments = new ArrayList<>();
 
@@ -340,7 +397,7 @@ public class FirebaseFirestore {
             }
           }
 
-          parsedIndices.add(
+          parsedIndexes.add(
               FieldIndex.create(
                   FieldIndex.UNKNOWN_ID, collectionGroup, segments, FieldIndex.INITIAL_STATE));
         }
@@ -349,7 +406,28 @@ public class FirebaseFirestore {
       throw new IllegalArgumentException("Failed to parse index configuration", e);
     }
 
-    return client.configureFieldIndexes(parsedIndices);
+    return client.configureFieldIndexes(parsedIndexes);
+  }
+
+  /**
+   * Gets the {@code PersistentCacheIndexManager} instance used by this {@code FirebaseFirestore}
+   * object.
+   *
+   * <p>This is not the same as Cloud Firestore Indexes. Persistent cache indexes are optional
+   * indexes that only exist within the SDK to assist in local query execution.
+   *
+   * @return The {@code PersistentCacheIndexManager} instance or null if local persistent storage is
+   *     not in use.
+   */
+  @Nullable
+  public synchronized PersistentCacheIndexManager getPersistentCacheIndexManager() {
+    ensureClientConfigured();
+    if (persistentCacheIndexManager == null
+        && (settings.isPersistenceEnabled()
+            || settings.getCacheSettings() instanceof PersistentCacheSettings)) {
+      persistentCacheIndexManager = new PersistentCacheIndexManager(client);
+    }
+    return persistentCacheIndexManager;
   }
 
   /**
@@ -403,9 +481,10 @@ public class FirebaseFirestore {
   }
 
   /**
-   * Executes the given updateFunction and then attempts to commit the changes applied within the
-   * transaction. If any document read within the transaction has changed, the updateFunction will
-   * be retried. If it fails to commit after 5 attempts, the transaction will fail.
+   * Executes the given {@code updateFunction} and then attempts to commit the changes applied
+   * within the transaction. If any document read within the transaction has changed, the
+   * updateFunction will be retried. If it fails to commit after 5 attempts (the default failure
+   * limit), the transaction will fail.
    *
    * <p>The maximum number of writes allowed in a single transaction is 500, but note that each
    * usage of {@link FieldValue#serverTimestamp()}, {@link FieldValue#arrayUnion(Object...)}, {@link
@@ -417,7 +496,7 @@ public class FirebaseFirestore {
    * @return The task returned from the updateFunction.
    */
   private <ResultT> Task<ResultT> runTransaction(
-      Transaction.Function<ResultT> updateFunction, Executor executor) {
+      TransactionOptions options, Transaction.Function<ResultT> updateFunction, Executor executor) {
     ensureClientConfigured();
 
     // We wrap the function they provide in order to
@@ -432,13 +511,15 @@ public class FirebaseFirestore {
                     updateFunction.apply(
                         new Transaction(internalTransaction, FirebaseFirestore.this)));
 
-    return client.transaction(wrappedUpdateFunction);
+    return client.transaction(options, wrappedUpdateFunction);
   }
 
   /**
-   * Executes the given updateFunction and then attempts to commit the changes applied within the
-   * transaction. If any document read within the transaction has changed, the updateFunction will
-   * be retried. If it fails to commit after 5 attempts, the transaction will fail.
+   * Executes the given {@code updateFunction} and then attempts to commit the changes applied
+   * within the transaction. If any document read within the transaction has changed, the
+   * updateFunction will be retried. If it fails to commit after 5 attempts (the default failure
+   * limit), the transaction will fail. To have a different number of retries, use the {@link
+   * FirebaseFirestore#runTransaction(TransactionOptions, Transaction.Function)} method instead.
    *
    * @param updateFunction The function to execute within the transaction context.
    * @return The task returned from the updateFunction.
@@ -446,9 +527,27 @@ public class FirebaseFirestore {
   @NonNull
   public <TResult> Task<TResult> runTransaction(
       @NonNull Transaction.Function<TResult> updateFunction) {
+    return runTransaction(TransactionOptions.DEFAULT, updateFunction);
+  }
+
+  /**
+   * Executes the given {@code updateFunction} and then attempts to commit the changes applied
+   * within the transaction. If any document read within the transaction has changed, the
+   * updateFunction will be retried. If it fails to commit after the maxmimum number of attempts
+   * specified in transactionOptions, the transaction will fail.
+   *
+   * @param options The transaction options for controlling execution.
+   * @param updateFunction The function to execute within the transaction context.
+   * @return The task returned from the updateFunction.
+   */
+  @NonNull
+  public <TResult> Task<TResult> runTransaction(
+      @NonNull TransactionOptions options, @NonNull Transaction.Function<TResult> updateFunction) {
     checkNotNull(updateFunction, "Provided transaction update function must not be null.");
     return runTransaction(
-        updateFunction, com.google.firebase.firestore.core.Transaction.getDefaultExecutor());
+        options,
+        updateFunction,
+        com.google.firebase.firestore.core.Transaction.getDefaultExecutor());
   }
 
   /**
@@ -527,6 +626,7 @@ public class FirebaseFirestore {
    */
   @NonNull
   public Task<Void> waitForPendingWrites() {
+    ensureClientConfigured();
     return client.waitForPendingWrites();
   }
 
@@ -713,6 +813,8 @@ public class FirebaseFirestore {
    * documents) and loaded to local cache using {@link #loadBundle(byte[])}. Once in local cache,
    * you can use this method to extract a query by name.
    */
+  // TODO(b/261013682): Use an explicit executor in continuations.
+  @SuppressLint("TaskMainThread")
   public @NonNull Task<Query> getNamedQuery(@NonNull String name) {
     ensureClientConfigured();
     return client
@@ -784,7 +886,7 @@ public class FirebaseFirestore {
 
   /**
    * Sets the language of the public API in the format of "gl-<language>/<version>" where version
-   * might be blank, e.g. `gl-cpp/`. The provided string is used as is.
+   * might be blank, for example `gl-cpp/`. The provided string is used as is.
    *
    * <p>Note: this method is package-private because it is expected to only be called via JNI (which
    * ignores access modifiers).

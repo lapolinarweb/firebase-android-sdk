@@ -17,6 +17,7 @@ package com.google.firebase.perf.transport;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.MINUTES;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager.NameNotFoundException;
@@ -51,6 +52,7 @@ import com.google.firebase.perf.v1.PerfMetric;
 import com.google.firebase.perf.v1.PerfMetricOrBuilder;
 import com.google.firebase.perf.v1.TraceMetric;
 import java.lang.ref.WeakReference;
+import java.text.DecimalFormat;
 import java.util.Collections;
 import java.util.Locale;
 import java.util.Map;
@@ -124,6 +126,8 @@ public class TransportManager implements AppStateCallback {
 
   private boolean isForegroundState = false;
 
+  // TODO(b/258263016): Migrate to go/firebase-android-executors
+  @SuppressLint("ThreadPoolCreation")
   private TransportManager() {
     // MAX_POOL_SIZE must always be 1. We only allow one thread in this Executor. The reason
     // we specifically use a ThreadPoolExecutor rather than generating one from ExecutorService
@@ -377,9 +381,8 @@ public class TransportManager implements AppStateCallback {
     if (isAllowedToDispatch(perfMetric)) {
       dispatchLog(perfMetric);
 
-      // TODO(b/172008005): This might not be the best place for this call, consider utilizing a
-      //  callback in the SessionManager itself.
-      SessionManager.getInstance().updatePerfSessionIfExpired();
+      // Check if the session is expired. If so, stop gauge collection.
+      SessionManager.getInstance().stopGaugeCollectionIfSessionRunningTooLong();
     }
   }
 
@@ -406,7 +409,8 @@ public class TransportManager implements AppStateCallback {
     }
 
     logger.debug(
-        "%s is not allowed to cache. Cache exhausted the limit (availableTracesForCaching: %d, availableNetworkRequestsForCaching: %d, availableGaugesForCaching: %d).",
+        "%s is not allowed to cache. Cache exhausted the limit (availableTracesForCaching: %d,"
+            + " availableNetworkRequestsForCaching: %d, availableGaugesForCaching: %d).",
         getLogcatMsg(perfMetricOrBuilder),
         availableTracesForCaching,
         availableNetworkRequestsForCaching,
@@ -440,16 +444,15 @@ public class TransportManager implements AppStateCallback {
       return false;
     }
 
-    if (!rateLimiter.check(perfMetric)) {
+    if (!rateLimiter.isEventSampled(perfMetric)) {
       incrementDropCount(perfMetric);
+      logger.info("Event dropped due to device sampling - %s", getLogcatMsg(perfMetric));
+      return false;
+    }
 
-      if (perfMetric.hasTraceMetric()) {
-        logger.info("Rate Limited - %s", getLogcatMsg(perfMetric.getTraceMetric()));
-
-      } else if (perfMetric.hasNetworkRequestMetric()) {
-        logger.info("Rate Limited - %s", getLogcatMsg(perfMetric.getNetworkRequestMetric()));
-      }
-
+    if (rateLimiter.isEventRateLimited(perfMetric)) {
+      incrementDropCount(perfMetric);
+      logger.info("Rate limited (per device) - %s", getLogcatMsg(perfMetric));
       return false;
     }
 
@@ -501,7 +504,7 @@ public class TransportManager implements AppStateCallback {
     ApplicationInfo.Builder appInfoBuilder =
         applicationInfoBuilder.setApplicationProcessState(appState);
 
-    if (perfMetricBuilder.hasTraceMetric()) {
+    if (perfMetricBuilder.hasTraceMetric() || perfMetricBuilder.hasNetworkRequestMetric()) {
       appInfoBuilder =
           appInfoBuilder
               .clone() // Needed so that we don't add global custom attributes everywhere
@@ -617,9 +620,9 @@ public class TransportManager implements AppStateCallback {
     long durationInUs = traceMetric.getDurationUs();
     return String.format(
         Locale.ENGLISH,
-        "trace metric: %s (duration: %.4fms)",
+        "trace metric: %s (duration: %sms)",
         traceMetric.getName(),
-        durationInUs / 1000.0);
+        new DecimalFormat("#.####").format(durationInUs / 1000.0));
   }
 
   private static String getLogcatMsg(NetworkRequestMetric networkRequestMetric) {
@@ -635,10 +638,10 @@ public class TransportManager implements AppStateCallback {
 
     return String.format(
         Locale.ENGLISH,
-        "network request trace: %s (responseCode: %s, responseTime: %.4fms)",
+        "network request trace: %s (responseCode: %s, responseTime: %sms)",
         networkRequestMetric.getUrl(),
         responseCode,
-        durationInUs / 1000.0);
+        new DecimalFormat("#.####").format(durationInUs / 1000.0));
   }
 
   private static String getLogcatMsg(GaugeMetric gaugeMetric) {

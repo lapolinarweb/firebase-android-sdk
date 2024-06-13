@@ -26,6 +26,7 @@ import org.gradle.testing.jacoco.plugins.JacocoTaskExtension;
 import org.gradle.testing.jacoco.tasks.JacocoReport;
 
 public final class Coverage {
+
   private Coverage() {}
 
   public static void apply(FirebaseLibraryExtension firebaseLibrary) {
@@ -34,8 +35,8 @@ public final class Coverage {
     File reportsDir = new File(project.getBuildDir(), "/reports/jacoco");
     JacocoPluginExtension jacoco = project.getExtensions().getByType(JacocoPluginExtension.class);
 
-    jacoco.setToolVersion("0.8.5");
-    jacoco.setReportsDir(reportsDir);
+    jacoco.setToolVersion("0.8.8");
+    jacoco.getReportsDirectory().set(reportsDir);
     project
         .getTasks()
         .withType(
@@ -66,35 +67,38 @@ public final class Coverage {
                       .add("**Manifest*.*")
                       .build();
 
-              task.setClassDirectories(
-                  project.files(
+              task.getClassDirectories()
+                  .setFrom(
+                      project.files(
+                          project.fileTree(
+                              ImmutableMap.of(
+                                  "dir",
+                                  project.getBuildDir() + "/intermediates/javac/release",
+                                  "excludes",
+                                  excludes)),
+                          project.fileTree(
+                              ImmutableMap.of(
+                                  "dir",
+                                  project.getBuildDir() + "/tmp/kotlin-classes/release",
+                                  "excludes",
+                                  excludes))));
+              task.getSourceDirectories()
+                  .setFrom(project.files("src/main/java", "src/main/kotlin"));
+              task.getExecutionData()
+                  .setFrom(
                       project.fileTree(
                           ImmutableMap.of(
                               "dir",
-                              project.getBuildDir() + "/intermediates/javac/release",
-                              "excludes",
-                              excludes)),
-                      project.fileTree(
-                          ImmutableMap.of(
-                              "dir",
-                              project.getBuildDir() + "/tmp/kotlin-classes/release",
-                              "excludes",
-                              excludes))));
-              task.setSourceDirectories(project.files("src/main/java", "src/main/kotlin"));
-              task.setExecutionData(
-                  project.fileTree(
-                      ImmutableMap.of(
-                          "dir",
-                          project.getBuildDir(),
-                          "includes",
-                          ImmutableList.of("jacoco/*.exec"))));
+                              project.getBuildDir(),
+                              "includes",
+                              ImmutableList.of("jacoco/*.exec"))));
               task.reports(
                   reports -> {
                     reports
                         .getHtml()
                         .setDestination(
                             new File(reportsDir, firebaseLibrary.artifactId.get() + "/html"));
-                    reports.getXml().setEnabled(true);
+                    reports.getXml().getRequired().set(true);
                     reports
                         .getXml()
                         .setDestination(

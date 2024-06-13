@@ -15,16 +15,27 @@
 package com.google.firebase.firestore.local;
 
 import static com.google.firebase.firestore.util.Assert.fail;
+import static com.google.firebase.firestore.util.Assert.hardAssert;
+import static com.google.firebase.firestore.util.Preconditions.checkNotNull;
 
+import android.database.Cursor;
 import androidx.annotation.Nullable;
 import com.google.firebase.firestore.auth.User;
 import com.google.firebase.firestore.model.DocumentKey;
 import com.google.firebase.firestore.model.ResourcePath;
 import com.google.firebase.firestore.model.mutation.Mutation;
+import com.google.firebase.firestore.model.mutation.Overlay;
+import com.google.firebase.firestore.util.BackgroundQueue;
+import com.google.firebase.firestore.util.Executors;
 import com.google.firestore.v1.Write;
 import com.google.protobuf.InvalidProtocolBufferException;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.SortedSet;
+import java.util.concurrent.Executor;
 
 public class SQLiteDocumentOverlayCache implements DocumentOverlayCache {
   private final SQLitePersistence db;
@@ -39,32 +50,73 @@ public class SQLiteDocumentOverlayCache implements DocumentOverlayCache {
 
   @Nullable
   @Override
-  public Mutation getOverlay(DocumentKey key) {
+  public Overlay getOverlay(DocumentKey key) {
     String collectionPath = EncodedPath.encode(key.getPath().popLast());
     String documentId = key.getPath().getLastSegment();
     return db.query(
-            "SELECT overlay_mutation FROM document_overlays WHERE uid = ? AND collection_path = ? AND document_id = ?")
+            "SELECT overlay_mutation, largest_batch_id FROM document_overlays "
+                + "WHERE uid = ? AND collection_path = ? AND document_id = ?")
         .binding(uid, collectionPath, documentId)
-        .firstValue(
-            row -> {
-              if (row == null) return null;
-
-              try {
-                Write mutation = Write.parseFrom(row.getBlob(0));
-                return serializer.decodeMutation(mutation);
-              } catch (InvalidProtocolBufferException e) {
-                throw fail("Overlay failed to parse: %s", e);
-              }
-            });
+        .firstValue(row -> this.decodeOverlay(row.getBlob(0), row.getInt(1)));
   }
 
-  private void saveOverlay(int largestBatchId, DocumentKey key, @Nullable Mutation mutation) {
+  @Override
+  public Map<DocumentKey, Overlay> getOverlays(SortedSet<DocumentKey> keys) {
+    hardAssert(keys.comparator() == null, "getOverlays() requires natural order");
+    Map<DocumentKey, Overlay> result = new HashMap<>();
+
+    BackgroundQueue backgroundQueue = new BackgroundQueue();
+    ResourcePath currentCollection = ResourcePath.EMPTY;
+    List<Object> accumulatedDocumentIds = new ArrayList<>();
+    for (DocumentKey key : keys) {
+      if (!currentCollection.equals(key.getCollectionPath())) {
+        processSingleCollection(result, backgroundQueue, currentCollection, accumulatedDocumentIds);
+        currentCollection = key.getCollectionPath();
+        accumulatedDocumentIds.clear();
+      }
+      accumulatedDocumentIds.add(key.getDocumentId());
+    }
+
+    processSingleCollection(result, backgroundQueue, currentCollection, accumulatedDocumentIds);
+    backgroundQueue.drain();
+    return result;
+  }
+
+  /** Reads the overlays for the documents in a single collection. */
+  private void processSingleCollection(
+      Map<DocumentKey, Overlay> result,
+      BackgroundQueue backgroundQueue,
+      ResourcePath collectionPath,
+      List<Object> documentIds) {
+    if (documentIds.isEmpty()) {
+      return;
+    }
+
+    SQLitePersistence.LongQuery longQuery =
+        new SQLitePersistence.LongQuery(
+            db,
+            "SELECT overlay_mutation, largest_batch_id FROM document_overlays "
+                + "WHERE uid = ? AND collection_path = ? AND document_id IN (",
+            Arrays.asList(uid, EncodedPath.encode(collectionPath)),
+            documentIds,
+            ")");
+    while (longQuery.hasMoreSubqueries()) {
+      longQuery
+          .performNextSubquery()
+          .forEach(row -> processOverlaysInBackground(backgroundQueue, result, row));
+    }
+  }
+
+  private void saveOverlay(int largestBatchId, DocumentKey key, Mutation mutation) {
+    String group = key.getCollectionGroup();
     String collectionPath = EncodedPath.encode(key.getPath().popLast());
     String documentId = key.getPath().getLastSegment();
     db.execute(
         "INSERT OR REPLACE INTO document_overlays "
-            + "(uid, collection_path, document_id, largest_batch_id, overlay_mutation) VALUES (?, ?, ?, ?, ?)",
+            + "(uid, collection_group, collection_path, document_id, largest_batch_id, overlay_mutation) "
+            + "VALUES (?, ?, ?, ?, ?, ?)",
         uid,
+        group,
         collectionPath,
         documentId,
         largestBatchId,
@@ -74,9 +126,9 @@ public class SQLiteDocumentOverlayCache implements DocumentOverlayCache {
   @Override
   public void saveOverlays(int largestBatchId, Map<DocumentKey, Mutation> overlays) {
     for (Map.Entry<DocumentKey, Mutation> entry : overlays.entrySet()) {
-      if (entry.getValue() != null) {
-        saveOverlay(largestBatchId, entry.getKey(), entry.getValue());
-      }
+      DocumentKey key = entry.getKey();
+      Mutation overlay = checkNotNull(entry.getValue(), "null value for key: %s", key);
+      saveOverlay(largestBatchId, key, overlay);
     }
   }
 
@@ -87,28 +139,90 @@ public class SQLiteDocumentOverlayCache implements DocumentOverlayCache {
   }
 
   @Override
-  public Map<DocumentKey, Mutation> getOverlays(ResourcePath collection, int sinceBatchId) {
-    String collectionPath = EncodedPath.encode(collection);
-
-    Map<DocumentKey, Mutation> result = new HashMap<>();
-
+  public Map<DocumentKey, Overlay> getOverlays(ResourcePath collection, int sinceBatchId) {
+    Map<DocumentKey, Overlay> result = new HashMap<>();
+    BackgroundQueue backgroundQueue = new BackgroundQueue();
     db.query(
-            "SELECT document_id, overlay_mutation FROM document_overlays "
+            "SELECT overlay_mutation, largest_batch_id FROM document_overlays "
                 + "WHERE uid = ? AND collection_path = ? AND largest_batch_id > ?")
-        .binding(uid, collectionPath, sinceBatchId)
+        .binding(uid, EncodedPath.encode(collection), sinceBatchId)
+        .forEach(row -> processOverlaysInBackground(backgroundQueue, result, row));
+    backgroundQueue.drain();
+    return result;
+  }
+
+  @Override
+  public Map<DocumentKey, Overlay> getOverlays(
+      String collectionGroup, int sinceBatchId, int count) {
+    Map<DocumentKey, Overlay> result = new HashMap<>();
+    String[] lastCollectionPath = new String[1];
+    String[] lastDocumentPath = new String[1];
+    int[] lastLargestBatchId = new int[1];
+
+    BackgroundQueue backgroundQueue = new BackgroundQueue();
+    db.query(
+            "SELECT overlay_mutation, largest_batch_id, collection_path, document_id "
+                + " FROM document_overlays "
+                + "WHERE uid = ? AND collection_group = ? AND largest_batch_id > ? "
+                + "ORDER BY largest_batch_id, collection_path, document_id LIMIT ?")
+        .binding(uid, collectionGroup, sinceBatchId, count)
         .forEach(
             row -> {
-              try {
-                String documentId = row.getString(0);
-                Write write = Write.parseFrom(row.getBlob(1));
-                Mutation mutation = serializer.decodeMutation(write);
-
-                result.put(DocumentKey.fromPath(collection.append(documentId)), mutation);
-              } catch (InvalidProtocolBufferException e) {
-                throw fail("Overlay failed to parse: %s", e);
-              }
+              lastLargestBatchId[0] = row.getInt(1);
+              lastCollectionPath[0] = row.getString(2);
+              lastDocumentPath[0] = row.getString(3);
+              processOverlaysInBackground(backgroundQueue, result, row);
             });
 
+    if (lastCollectionPath[0] == null) {
+      return result;
+    }
+
+    // This function should not return partial batch overlays, even if the number of overlays in the
+    // result set exceeds the given `count` argument. Since the `LIMIT` in the above query might
+    // result in a partial batch, the following query appends any remaining overlays for the last
+    // batch.
+    db.query(
+            "SELECT overlay_mutation, largest_batch_id FROM document_overlays "
+                + "WHERE uid = ? AND collection_group = ? "
+                + "AND (collection_path > ? OR (collection_path = ? AND document_id > ?)) "
+                + "AND largest_batch_id = ?")
+        .binding(
+            uid,
+            collectionGroup,
+            lastCollectionPath[0],
+            lastCollectionPath[0],
+            lastDocumentPath[0],
+            lastLargestBatchId[0])
+        .forEach(row -> processOverlaysInBackground(backgroundQueue, result, row));
+    backgroundQueue.drain();
     return result;
+  }
+
+  private void processOverlaysInBackground(
+      BackgroundQueue backgroundQueue, Map<DocumentKey, Overlay> results, Cursor row) {
+    byte[] rawMutation = row.getBlob(0);
+    int largestBatchId = row.getInt(1);
+
+    // Since scheduling background tasks incurs overhead, we only dispatch to a
+    // background thread if there are still some documents remaining.
+    Executor executor = row.isLast() ? Executors.DIRECT_EXECUTOR : backgroundQueue;
+    executor.execute(
+        () -> {
+          Overlay overlay = decodeOverlay(rawMutation, largestBatchId);
+          synchronized (results) {
+            results.put(overlay.getKey(), overlay);
+          }
+        });
+  }
+
+  private Overlay decodeOverlay(byte[] rawMutation, int largestBatchId) {
+    try {
+      Write write = Write.parseFrom(rawMutation);
+      Mutation mutation = serializer.decodeMutation(write);
+      return Overlay.create(largestBatchId, mutation);
+    } catch (InvalidProtocolBufferException e) {
+      throw fail("Overlay failed to parse: %s", e);
+    }
   }
 }

@@ -28,7 +28,8 @@ import android.content.Context;
 import android.os.Build;
 import androidx.annotation.RequiresApi;
 import androidx.test.core.app.ApplicationProvider;
-import com.google.firebase.crashlytics.internal.log.LogFileManager;
+import com.google.firebase.crashlytics.internal.metadata.LogFileManager;
+import com.google.firebase.crashlytics.internal.metadata.UserMetadata;
 import com.google.firebase.crashlytics.internal.model.CrashlyticsReport;
 import com.google.firebase.crashlytics.internal.persistence.CrashlyticsReportPersistence;
 import com.google.firebase.crashlytics.internal.send.DataTransportCrashlyticsReportSender;
@@ -50,6 +51,7 @@ public class SessionReportingCoordinatorRobolectricTest {
   @Mock private DataTransportCrashlyticsReportSender reportSender;
   @Mock private LogFileManager logFileManager;
   @Mock private UserMetadata reportMetadata;
+  @Mock private IdManager idManager;
   @Mock private CrashlyticsReport.Session.Event mockEvent;
   @Mock private CrashlyticsReport.Session.Event.Builder mockEventBuilder;
   @Mock private CrashlyticsReport.Session.Event.Application mockEventApp;
@@ -65,7 +67,12 @@ public class SessionReportingCoordinatorRobolectricTest {
 
     reportingCoordinator =
         new SessionReportingCoordinator(
-            dataCapture, reportPersistence, reportSender, logFileManager, reportMetadata);
+            dataCapture,
+            reportPersistence,
+            reportSender,
+            logFileManager,
+            reportMetadata,
+            idManager);
     mockEventInteractions();
   }
 

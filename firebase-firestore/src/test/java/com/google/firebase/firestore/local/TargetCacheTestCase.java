@@ -60,6 +60,7 @@ public abstract class TargetCacheTestCase {
   public void setUp() {
     persistence = getPersistence();
     targetCache = persistence.getTargetCache();
+    persistence.getRemoteDocumentCache().setIndexManager(new MemoryIndexManager());
     previousSequenceNumber = 1000;
   }
 
@@ -330,7 +331,8 @@ public abstract class TargetCacheTestCase {
         QueryPurpose.LISTEN,
         version(version),
         version(version),
-        resumeToken(version));
+        resumeToken(version),
+        null);
   }
 
   /** Adds the given query data to the targetCache under test, committing immediately. */

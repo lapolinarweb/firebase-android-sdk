@@ -32,17 +32,22 @@ import com.google.firebase.crashlytics.BuildConfig;
 import com.google.firebase.crashlytics.internal.CrashlyticsNativeComponent;
 import com.google.firebase.crashlytics.internal.CrashlyticsNativeComponentDeferredProxy;
 import com.google.firebase.crashlytics.internal.CrashlyticsTestCase;
+import com.google.firebase.crashlytics.internal.DevelopmentPlatformProvider;
+import com.google.firebase.crashlytics.internal.RemoteConfigDeferredProxy;
 import com.google.firebase.crashlytics.internal.analytics.UnavailableAnalyticsEventLogger;
 import com.google.firebase.crashlytics.internal.breadcrumbs.BreadcrumbHandler;
 import com.google.firebase.crashlytics.internal.breadcrumbs.BreadcrumbSource;
 import com.google.firebase.crashlytics.internal.breadcrumbs.DisabledBreadcrumbSource;
+import com.google.firebase.crashlytics.internal.metadata.UserMetadata;
 import com.google.firebase.crashlytics.internal.persistence.FileStore;
+import com.google.firebase.crashlytics.internal.settings.Settings;
 import com.google.firebase.crashlytics.internal.settings.SettingsController;
-import com.google.firebase.crashlytics.internal.settings.TestSettingsData;
-import com.google.firebase.crashlytics.internal.settings.model.SettingsData;
+import com.google.firebase.crashlytics.internal.settings.TestSettings;
 import com.google.firebase.inject.Deferred;
 import com.google.firebase.installations.FirebaseInstallationsApi;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.mockito.Mockito;
@@ -103,6 +108,12 @@ public class CrashlyticsCoreTest extends CrashlyticsTestCase {
     final String value1 = "value1";
     crashlyticsCore.setCustomKey(key1, value1);
     assertEquals(value1, metadata.getCustomKeys().get(key1));
+
+    // Adding an existing key with the same value should return false
+    assertFalse(metadata.setCustomKey(key1, value1));
+    assertTrue(metadata.setCustomKey(key1, "someOtherValue"));
+    assertTrue(metadata.setCustomKey(key1, value1));
+    assertFalse(metadata.setCustomKey(key1, value1));
 
     final String longValue = longId.replaceAll("0", "x");
     final String superLongValue = longValue + "some more chars";
@@ -331,20 +342,22 @@ public class CrashlyticsCoreTest extends CrashlyticsTestCase {
     Thread.setDefaultUncaughtExceptionHandler(NOOP_HANDLER);
 
     SettingsController mockSettingsController = mock(SettingsController.class);
-    final SettingsData settings = new TestSettingsData(3);
-    when(mockSettingsController.getSettings()).thenReturn(settings);
-    when(mockSettingsController.getAppSettings()).thenReturn(Tasks.forResult(settings.appData));
+    final Settings settings = new TestSettings(3);
+    when(mockSettingsController.getSettingsSync()).thenReturn(settings);
+    when(mockSettingsController.getSettingsAsync()).thenReturn(Tasks.forResult(settings));
 
+    List<BuildIdInfo> buildIdInfoList = new ArrayList<>();
+    buildIdInfoList.add(new BuildIdInfo("lib.so", "x86", "aabb"));
     AppData appData =
         new AppData(
             GOOGLE_APP_ID,
             "buildId",
+            buildIdInfoList,
             "installerPackageName",
             "packageName",
             "versionCode",
             "versionName",
-            "Unity",
-            "1.0");
+            mock(DevelopmentPlatformProvider.class));
 
     crashlyticsCore.onPreExecute(appData, mockSettingsController);
 
@@ -414,7 +427,9 @@ public class CrashlyticsCoreTest extends CrashlyticsTestCase {
               breadcrumbSource,
               new UnavailableAnalyticsEventLogger(),
               new FileStore(context),
-              new SameThreadExecutorService());
+              new SameThreadExecutorService(),
+              mock(CrashlyticsAppQualitySessionsSubscriber.class),
+              mock(RemoteConfigDeferredProxy.class));
       return crashlyticsCore;
     }
   }

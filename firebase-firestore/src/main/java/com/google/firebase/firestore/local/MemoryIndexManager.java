@@ -16,10 +16,12 @@ package com.google.firebase.firestore.local;
 import static com.google.firebase.firestore.util.Assert.hardAssert;
 
 import androidx.annotation.Nullable;
+import com.google.firebase.database.collection.ImmutableSortedMap;
 import com.google.firebase.firestore.core.Target;
 import com.google.firebase.firestore.model.Document;
 import com.google.firebase.firestore.model.DocumentKey;
 import com.google.firebase.firestore.model.FieldIndex;
+import com.google.firebase.firestore.model.FieldIndex.IndexOffset;
 import com.google.firebase.firestore.model.ResourcePath;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -27,7 +29,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 /** An in-memory implementation of IndexManager. */
 class MemoryIndexManager implements IndexManager {
@@ -59,18 +60,19 @@ class MemoryIndexManager implements IndexManager {
     // Field indices are not supported with memory persistence.
   }
 
-  @Nullable
   @Override
-  public FieldIndex getFieldIndex(Target target) {
+  public void deleteAllFieldIndexes() {
     // Field indices are not supported with memory persistence.
-    return null;
   }
 
   @Override
+  public void createTargetIndexes(Target target) {}
+
+  @Override
   @Nullable
-  public Set<DocumentKey> getDocumentsMatchingTarget(FieldIndex fieldIndex, Target target) {
+  public List<DocumentKey> getDocumentsMatchingTarget(Target target) {
     // Field indices are not supported with memory persistence.
-    return Collections.emptySet();
+    return null;
   }
 
   @Nullable
@@ -81,7 +83,7 @@ class MemoryIndexManager implements IndexManager {
   }
 
   @Override
-  public void updateCollectionGroup(String collectionGroup, FieldIndex.IndexOffset offset) {
+  public void updateCollectionGroup(String collectionGroup, IndexOffset offset) {
     // Field indices are not supported with memory persistence.
   }
 
@@ -98,7 +100,22 @@ class MemoryIndexManager implements IndexManager {
   }
 
   @Override
-  public void updateIndexEntries(Collection<Document> documents) {
+  public IndexOffset getMinOffset(Target target) {
+    return IndexOffset.NONE;
+  }
+
+  @Override
+  public IndexOffset getMinOffset(String collectionGroup) {
+    return IndexOffset.NONE;
+  }
+
+  @Override
+  public IndexType getIndexType(Target target) {
+    return IndexType.NONE;
+  }
+
+  @Override
+  public void updateIndexEntries(ImmutableSortedMap<DocumentKey, Document> documents) {
     // Field indices are not supported with memory persistence.
   }
 

@@ -21,6 +21,8 @@ import com.google.firebase.firestore.core.ListenSequence;
 import com.google.firebase.firestore.model.DocumentKey;
 import com.google.firebase.firestore.model.ResourcePath;
 import com.google.firebase.firestore.util.Consumer;
+import java.util.ArrayList;
+import java.util.List;
 
 /** Provides LRU functionality for SQLite persistence. */
 class SQLiteLruReferenceDelegate implements ReferenceDelegate, LruDelegate {
@@ -159,26 +161,36 @@ class SQLiteLruReferenceDelegate implements ReferenceDelegate, LruDelegate {
 
     boolean resultsRemaining = true;
 
+    List<DocumentKey> docsToRemove = new ArrayList<>();
+    final ResourcePath[] startPath = {ResourcePath.EMPTY};
     while (resultsRemaining) {
       int rowsProccessed =
           persistence
               .query(
-                  "select path from target_documents group by path having COUNT(*) = 1 AND target_id = 0 AND sequence_number <= ? LIMIT ?")
-              .binding(upperBound, REMOVE_ORPHANED_DOCUMENTS_BATCH_SIZE)
+                  "select path from target_documents group by path having COUNT(*) = 1 "
+                      + "AND target_id = 0 AND sequence_number <= ? AND path > ? LIMIT ?")
+              .binding(
+                  upperBound,
+                  EncodedPath.encode(startPath[0]),
+                  REMOVE_ORPHANED_DOCUMENTS_BATCH_SIZE)
               .forEach(
                   row -> {
                     ResourcePath path = EncodedPath.decodeResourcePath(row.getString(0));
                     DocumentKey key = DocumentKey.fromPath(path);
                     if (!isPinned(key)) {
                       count[0]++;
-                      persistence.getRemoteDocumentCache().remove(key);
+                      docsToRemove.add(key);
                       removeSentinel(key);
                     }
+
+                    // Set startPath so next batch (if necessary) will pick up from where it's left.
+                    startPath[0] = path;
                   });
 
       resultsRemaining = (rowsProccessed == REMOVE_ORPHANED_DOCUMENTS_BATCH_SIZE);
     }
 
+    persistence.getRemoteDocumentCache().removeAll(docsToRemove);
     return count[0];
   }
 

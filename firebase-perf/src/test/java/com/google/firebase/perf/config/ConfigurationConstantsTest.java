@@ -18,6 +18,7 @@ import static com.google.common.truth.Truth.assertThat;
 
 import com.google.firebase.perf.config.ConfigurationConstants.CollectionDeactivated;
 import com.google.firebase.perf.config.ConfigurationConstants.CollectionEnabled;
+import com.google.firebase.perf.config.ConfigurationConstants.FragmentSamplingRate;
 import com.google.firebase.perf.config.ConfigurationConstants.LogSourceName;
 import com.google.firebase.perf.config.ConfigurationConstants.NetworkEventCountBackground;
 import com.google.firebase.perf.config.ConfigurationConstants.NetworkEventCountForeground;
@@ -90,6 +91,7 @@ public class ConfigurationConstantsTest {
         SessionsCpuCaptureFrequencyForegroundMs.getInstance();
 
     assertThat(configFlag.getDefault()).isEqualTo(100L);
+    assertThat(configFlag.getDefaultOnRcFetchFail()).isEqualTo(300L);
     assertThat(configFlag.getDeviceCacheFlag())
         .isEqualTo("com.google.firebase.perf.SessionsCpuCaptureFrequencyForegroundMs");
     assertThat(configFlag.getRemoteConfigFlag())
@@ -116,6 +118,7 @@ public class ConfigurationConstantsTest {
         SessionsMemoryCaptureFrequencyForegroundMs.getInstance();
 
     assertThat(configFlag.getDefault()).isEqualTo(100L);
+    assertThat(configFlag.getDefaultOnRcFetchFail()).isEqualTo(300L);
     assertThat(configFlag.getDeviceCacheFlag())
         .isEqualTo("com.google.firebase.perf.SessionsMemoryCaptureFrequencyForegroundMs");
     assertThat(configFlag.getRemoteConfigFlag())
@@ -151,7 +154,8 @@ public class ConfigurationConstantsTest {
   public void getInstance_TraceSamplingRate_validateConstants() {
     TraceSamplingRate configFlag = TraceSamplingRate.getInstance();
 
-    assertThat(configFlag.getDefault()).isEqualTo(1.00f);
+    assertThat(configFlag.getDefault()).isEqualTo(1.00);
+    assertThat(configFlag.getDefaultOnRcFetchFail()).isEqualTo(0.001);
     assertThat(configFlag.getDeviceCacheFlag())
         .isEqualTo("com.google.firebase.perf.TraceSamplingRate");
     assertThat(configFlag.getRemoteConfigFlag()).isEqualTo("fpr_vc_trace_sampling_rate");
@@ -162,7 +166,8 @@ public class ConfigurationConstantsTest {
   public void getInstance_NetworkRequestSamplingRate_validateConstants() {
     NetworkRequestSamplingRate configFlag = NetworkRequestSamplingRate.getInstance();
 
-    assertThat(configFlag.getDefault()).isEqualTo(1.00f);
+    assertThat(configFlag.getDefault()).isEqualTo(1.00);
+    assertThat(configFlag.getDefaultOnRcFetchFail()).isEqualTo(0.001);
     assertThat(configFlag.getDeviceCacheFlag())
         .isEqualTo("com.google.firebase.perf.NetworkRequestSamplingRate");
     assertThat(configFlag.getRemoteConfigFlag()).isEqualTo("fpr_vc_network_request_sampling_rate");
@@ -173,7 +178,8 @@ public class ConfigurationConstantsTest {
   public void getInstance_SessionsSamplingRate_validateConstants() {
     SessionsSamplingRate configFlag = SessionsSamplingRate.getInstance();
 
-    assertThat(configFlag.getDefault()).isEqualTo(0.01f);
+    assertThat(configFlag.getDefault()).isEqualTo(0.01);
+    assertThat(configFlag.getDefaultOnRcFetchFail()).isEqualTo(0.00001);
     assertThat(configFlag.getDeviceCacheFlag())
         .isEqualTo("com.google.firebase.perf.SessionSamplingRate");
     assertThat(configFlag.getRemoteConfigFlag()).isEqualTo("fpr_vc_session_sampling_rate");
@@ -252,5 +258,16 @@ public class ConfigurationConstantsTest {
     assertThat(LogSourceName.getLogSourceName(462L)).isEqualTo("FIREPERF");
     assertThat(LogSourceName.getLogSourceName(675L)).isEqualTo("FIREPERF_INTERNAL_LOW");
     assertThat(LogSourceName.getLogSourceName(676L)).isEqualTo("FIREPERF_INTERNAL_HIGH");
+  }
+
+  @Test
+  public void getInstance_FragmentSamplingRate_validateConstants() {
+    FragmentSamplingRate configFlag = FragmentSamplingRate.getInstance();
+
+    assertThat(configFlag.getDefault()).isEqualTo(0.0);
+    assertThat(configFlag.getDeviceCacheFlag())
+        .isEqualTo("com.google.firebase.perf.FragmentSamplingRate");
+    assertThat(configFlag.getRemoteConfigFlag()).isEqualTo("fpr_vc_fragment_sampling_rate");
+    assertThat(configFlag.getMetadataFlag()).isEqualTo("fragment_sampling_percentage");
   }
 }

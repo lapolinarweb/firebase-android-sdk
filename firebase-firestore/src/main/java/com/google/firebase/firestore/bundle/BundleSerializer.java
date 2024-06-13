@@ -22,7 +22,6 @@ import com.google.firebase.firestore.core.FieldFilter;
 import com.google.firebase.firestore.core.Filter;
 import com.google.firebase.firestore.core.OrderBy;
 import com.google.firebase.firestore.core.Query;
-import com.google.firebase.firestore.core.Target;
 import com.google.firebase.firestore.model.DocumentKey;
 import com.google.firebase.firestore.model.FieldPath;
 import com.google.firebase.firestore.model.MutableDocument;
@@ -63,8 +62,8 @@ public class BundleSerializer {
 
     timestampFormat = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.ENGLISH);
     GregorianCalendar calendar = new GregorianCalendar(TimeZone.getTimeZone("UTC"));
-    // We use Proleptic Gregorian Calendar (i.e., Gregorian calendar extends backwards to year one)
-    // for timestamp formatting.
+    // We use Proleptic Gregorian Calendar (specifically, Gregorian calendar extends backwards to
+    // year one) for timestamp formatting.
     calendar.setGregorianChange(new Date(Long.MIN_VALUE));
     timestampFormat.setCalendar(calendar);
   }
@@ -154,7 +153,20 @@ public class BundleSerializer {
     Query.LimitType limitType = decodeLimitType(bundledQuery);
 
     return new BundledQuery(
-        new Target(parent, collectionGroup, filters, orderBys, limit, startAt, endAt), limitType);
+        new Query(
+                parent,
+                collectionGroup,
+                filters,
+                orderBys,
+                limit,
+                // Not using `limitType` because bundled queries are what the backend sees,
+                // and there is no limit_to_last for the backend.
+                // Limit type is applied when the query is read back instead.
+                Query.LimitType.LIMIT_TO_FIRST,
+                startAt,
+                endAt)
+            .toTarget(),
+        limitType);
   }
 
   private int decodeLimit(JSONObject structuredQuery) {
@@ -432,16 +444,17 @@ public class BundleSerializer {
 
     switch (operator) {
       case "IS_NAN":
-        result.add(FieldFilter.create(fieldPath, Filter.Operator.EQUAL, Values.NAN_VALUE));
+        result.add(FieldFilter.create(fieldPath, FieldFilter.Operator.EQUAL, Values.NAN_VALUE));
         break;
       case "IS_NULL":
-        result.add(FieldFilter.create(fieldPath, Filter.Operator.EQUAL, Values.NULL_VALUE));
+        result.add(FieldFilter.create(fieldPath, FieldFilter.Operator.EQUAL, Values.NULL_VALUE));
         break;
       case "IS_NOT_NAN":
-        result.add(FieldFilter.create(fieldPath, Filter.Operator.NOT_EQUAL, Values.NAN_VALUE));
+        result.add(FieldFilter.create(fieldPath, FieldFilter.Operator.NOT_EQUAL, Values.NAN_VALUE));
         break;
       case "IS_NOT_NULL":
-        result.add(FieldFilter.create(fieldPath, Filter.Operator.NOT_EQUAL, Values.NULL_VALUE));
+        result.add(
+            FieldFilter.create(fieldPath, FieldFilter.Operator.NOT_EQUAL, Values.NULL_VALUE));
         break;
       default:
         throw new IllegalArgumentException("Unexpected unary filter: " + operator);

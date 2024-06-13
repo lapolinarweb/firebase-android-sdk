@@ -30,16 +30,20 @@ import com.google.firebase.FirebaseOptions;
 import com.google.firebase.crashlytics.internal.CrashlyticsNativeComponent;
 import com.google.firebase.crashlytics.internal.CrashlyticsNativeComponentDeferredProxy;
 import com.google.firebase.crashlytics.internal.CrashlyticsTestCase;
+import com.google.firebase.crashlytics.internal.DevelopmentPlatformProvider;
+import com.google.firebase.crashlytics.internal.RemoteConfigDeferredProxy;
 import com.google.firebase.crashlytics.internal.analytics.UnavailableAnalyticsEventLogger;
 import com.google.firebase.crashlytics.internal.breadcrumbs.DisabledBreadcrumbSource;
 import com.google.firebase.crashlytics.internal.persistence.FileStore;
+import com.google.firebase.crashlytics.internal.settings.Settings;
 import com.google.firebase.crashlytics.internal.settings.SettingsController;
-import com.google.firebase.crashlytics.internal.settings.TestSettingsData;
-import com.google.firebase.crashlytics.internal.settings.model.SettingsData;
+import com.google.firebase.crashlytics.internal.settings.TestSettings;
 import com.google.firebase.inject.Deferred;
 import com.google.firebase.installations.FirebaseInstallationsApi;
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 
 public class CrashlyticsCoreInitializationTest extends CrashlyticsTestCase {
@@ -70,9 +74,9 @@ public class CrashlyticsCoreInitializationTest extends CrashlyticsTestCase {
     fileStore = new FileStore(getContext());
 
     mockSettingsController = mock(SettingsController.class);
-    final SettingsData settingsData = new TestSettingsData();
-    when(mockSettingsController.getSettings()).thenReturn(settingsData);
-    when(mockSettingsController.getAppSettings()).thenReturn(Tasks.forResult(settingsData.appData));
+    Settings settings = new TestSettings();
+    when(mockSettingsController.getSettingsSync()).thenReturn(settings);
+    when(mockSettingsController.getSettingsAsync()).thenReturn(Tasks.forResult(settings));
   }
 
   @Override
@@ -133,7 +137,9 @@ public class CrashlyticsCoreInitializationTest extends CrashlyticsTestCase {
           new DisabledBreadcrumbSource(),
           new UnavailableAnalyticsEventLogger(),
           fileStore,
-          crashHandlerExecutor);
+          crashHandlerExecutor,
+          mock(CrashlyticsAppQualitySessionsSubscriber.class),
+          mock(RemoteConfigDeferredProxy.class));
     }
   }
 
@@ -255,16 +261,18 @@ public class CrashlyticsCoreInitializationTest extends CrashlyticsTestCase {
   }
 
   private void setupAppData(String buildId) {
+    List<BuildIdInfo> buildIdInfoList = new ArrayList<>();
+    buildIdInfoList.add(new BuildIdInfo("lib.so", "x86", "aabb"));
     appData =
         new AppData(
             GOOGLE_APP_ID,
             buildId,
+            buildIdInfoList,
             "installerPackageName",
             "packageName",
             "versionCode",
             "versionName",
-            "Unity",
-            "1.0");
+            mock(DevelopmentPlatformProvider.class));
   }
 
   private void setupResource(Integer resId, String type, String name, String value) {

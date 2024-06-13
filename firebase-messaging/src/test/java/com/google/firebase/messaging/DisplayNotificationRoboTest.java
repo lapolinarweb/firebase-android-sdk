@@ -17,7 +17,6 @@ import static com.google.common.truth.Truth.assertThat;
 import static org.hamcrest.Matchers.is;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
-import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
@@ -45,6 +44,7 @@ import android.os.Bundle;
 import android.os.Process;
 import android.os.SystemClock;
 import androidx.test.core.app.ApplicationProvider;
+
 import com.google.firebase.messaging.shadows.ShadowPreconditions;
 import com.google.firebase.messaging.testing.Bundles;
 import com.google.firebase.messaging.testing.TestImageServer;
@@ -54,7 +54,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.json.JSONArray;
 import org.junit.Before;
@@ -127,7 +127,7 @@ public class DisplayNotificationRoboTest {
   private ActivityManager activityManager;
   private KeyguardManager keyguardManager;
   private NotificationManager notificationManager;
-  private Executor executor;
+  private ExecutorService executor;
 
   @Before
   public void setUp() throws IOException {
@@ -197,7 +197,8 @@ public class DisplayNotificationRoboTest {
     Bundle metadata = new Bundle();
     metadata.putInt(METADATA_DEFAULT_ICON, resId);
     PackageInfo packageInfo =
-        shadowOf(context.getPackageManager()).getPackageInfoForTesting(context.getPackageName());
+        shadowOf(context.getPackageManager())
+            .getInternalMutablePackageInfo(context.getPackageName());
     packageInfo.applicationInfo.metaData = metadata;
 
     Bundle data = new Bundle();
@@ -250,7 +251,8 @@ public class DisplayNotificationRoboTest {
     metadata.putInt(
         METADATA_DEFAULT_ICON, com.google.firebase.messaging.test.R.drawable.adaptive_icon);
     PackageInfo packageInfo =
-        shadowOf(context.getPackageManager()).getPackageInfoForTesting(context.getPackageName());
+        shadowOf(context.getPackageManager())
+            .getInternalMutablePackageInfo(context.getPackageName());
     packageInfo.applicationInfo.metaData = metadata;
 
     Bundle data = new Bundle();
@@ -508,7 +510,8 @@ public class DisplayNotificationRoboTest {
     metadata.putInt(
         METADATA_DEFAULT_COLOR, com.google.firebase.messaging.test.R.color.fcm_test_color);
     PackageInfo packageInfo =
-        shadowOf(context.getPackageManager()).getPackageInfoForTesting(context.getPackageName());
+        shadowOf(context.getPackageManager())
+            .getInternalMutablePackageInfo(context.getPackageName());
     packageInfo.applicationInfo.metaData = metadata;
 
     Bundle data = new Bundle();
@@ -521,20 +524,6 @@ public class DisplayNotificationRoboTest {
     assertEquals(
         context.getResources().getColor(com.google.firebase.messaging.test.R.color.fcm_test_color),
         n.color);
-  }
-
-  /** Test that a color is ignored pre-Lollipop where it wasn't supported. */
-  @Test
-  @Config(sdk = Build.VERSION_CODES.KITKAT)
-  public void testColor_kitkat() {
-    final String color = "#123456";
-    Bundle data = new Bundle();
-    data.putString(KEY_COLOR, color);
-    assertTrue(
-        new DisplayNotification(context, new NotificationParams(data), executor)
-            .handleNotification());
-
-    assertNotNull(getSingleNotification());
   }
 
   /** Test a valid notification with default notification sound is displayed. */

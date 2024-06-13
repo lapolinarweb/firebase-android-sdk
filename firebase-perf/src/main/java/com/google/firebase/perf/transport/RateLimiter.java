@@ -20,7 +20,8 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 
 import android.content.Context;
 import androidx.annotation.NonNull;
-import com.google.android.gms.common.util.VisibleForTesting;
+import androidx.annotation.VisibleForTesting;
+
 import com.google.firebase.perf.config.ConfigResolver;
 import com.google.firebase.perf.logging.AndroidLogger;
 import com.google.firebase.perf.metrics.resource.ResourceType;
@@ -29,11 +30,9 @@ import com.google.firebase.perf.util.Constants;
 import com.google.firebase.perf.util.Rate;
 import com.google.firebase.perf.util.Timer;
 import com.google.firebase.perf.util.Utils;
-import com.google.firebase.perf.v1.NetworkRequestMetric;
 import com.google.firebase.perf.v1.PerfMetric;
 import com.google.firebase.perf.v1.PerfSession;
 import com.google.firebase.perf.v1.SessionVerbosity;
-import com.google.firebase.perf.v1.TraceMetric;
 import java.util.List;
 import java.util.Random;
 
@@ -48,8 +47,10 @@ final class RateLimiter {
 
   /** Gets the sampling and rate limiting configs. */
   private final ConfigResolver configResolver;
-  /** The app's bucket ID for sampling, a number in [0.0f, 1.0f). */
-  private final float samplingBucketId;
+  /** The app's bucket ID for sampling, a number in [0.0, 1.0). */
+  private final double samplingBucketId;
+
+  private final double fragmentBucketId;
 
   private RateLimiterImpl traceLimiter = null;
   private RateLimiterImpl networkLimiter = null;
@@ -65,26 +66,37 @@ final class RateLimiter {
    * @param capacity token bucket capacity
    */
   public RateLimiter(@NonNull Context appContext, final Rate rate, final long capacity) {
-    this(rate, capacity, new Clock(), getSamplingBucketId(), ConfigResolver.getInstance());
+    this(
+        rate,
+        capacity,
+        new Clock(),
+        getSamplingBucketId(),
+        getSamplingBucketId(),
+        ConfigResolver.getInstance());
     this.isLogcatEnabled = Utils.isDebugLoggingEnabled(appContext);
   }
 
   /** Generates a bucket id between [0.0f, 1.0f) for sampling, it is sticky across app lifecycle. */
   @VisibleForTesting
-  static float getSamplingBucketId() {
-    return new Random().nextFloat();
+  static double getSamplingBucketId() {
+    return new Random().nextDouble();
   }
 
   RateLimiter(
       final Rate rate,
       final long capacity,
       final Clock clock,
-      float samplingBucketId,
+      double samplingBucketId,
+      double fragmentBucketId,
       ConfigResolver configResolver) {
     Utils.checkArgument(
-        0.0f <= samplingBucketId && samplingBucketId < 1.0f,
-        "Sampling bucket ID should be in range [0.0f, 1.0f).");
+        0.0 <= samplingBucketId && samplingBucketId < 1.0,
+        "Sampling bucket ID should be in range [0.0, 1.0).");
+    Utils.checkArgument(
+        0.0 <= fragmentBucketId && fragmentBucketId < 1.0,
+        "Fragment sampling bucket ID should be in range [0.0, 1.0).");
     this.samplingBucketId = samplingBucketId;
+    this.fragmentBucketId = fragmentBucketId;
     this.configResolver = configResolver;
 
     traceLimiter =
@@ -96,57 +108,80 @@ final class RateLimiter {
 
   /** Returns whether device is allowed to send trace events based on trace sampling rate. */
   private boolean isDeviceAllowedToSendTraces() {
-    float validTraceSamplingBucketIdThreshold = configResolver.getTraceSamplingRate();
+    double validTraceSamplingBucketIdThreshold = configResolver.getTraceSamplingRate();
     return samplingBucketId < validTraceSamplingBucketIdThreshold;
   }
 
   /** Returns whether device is allowed to send network events based on network sampling rate. */
   private boolean isDeviceAllowedToSendNetworkEvents() {
-    float validNetworkSamplingBucketIdThreshold = configResolver.getNetworkRequestSamplingRate();
+    double validNetworkSamplingBucketIdThreshold = configResolver.getNetworkRequestSamplingRate();
     return samplingBucketId < validNetworkSamplingBucketIdThreshold;
   }
 
   /**
-   * Check if we should log the {@link PerfMetric} to transport.
+   * Returns whether device is allowed to send Fragment screen trace events based on Fragment screen
+   * trace sampling rate.
+   */
+  private boolean isDeviceAllowedToSendFragmentScreenTraces() {
+    double validFragmentSamplingBucketIdThreshold = configResolver.getFragmentSamplingRate();
+    return fragmentBucketId < validFragmentSamplingBucketIdThreshold;
+  }
+
+  /** Identifies if the {@link PerfMetric} is a Fragment screen trace */
+  protected boolean isFragmentScreenTrace(PerfMetric metric) {
+    return metric.hasTraceMetric()
+        && metric.getTraceMetric().getName().startsWith(Constants.SCREEN_TRACE_PREFIX)
+        && metric.getTraceMetric().containsCustomAttributes(Constants.ACTIVITY_ATTRIBUTE_KEY);
+  }
+
+  /**
+   * Check if the {@link PerfMetric} should be rate limited.
    *
-   * <p>Cases in which we don't log a {@link PerfMetric} to transport:
-   *
-   * <ul>
-   *   <li>It is a {@link TraceMetric}, the {@link PerfSession} is not verbose and trace metrics are
-   *       sampled.
-   *   <li>It is a {@link NetworkRequestMetric}, the {@link PerfSession} is not verbose and network
-   *       requests are sampled.
-   *   <li>The number of metrics being sent exceeds what the rate limiter allows.
-   * </ul>
+   * @param metric {@link PerfMetric} object.
+   * @return true if event is rated limited, false if event is not rate limited.
+   */
+  boolean isEventRateLimited(PerfMetric metric) {
+    if (!isRateLimitApplicable(metric)) {
+      // Apply rate limiting on this metric.
+      return false;
+    }
+
+    if (metric.hasNetworkRequestMetric()) {
+      return !networkLimiter.check(metric);
+    } else if (metric.hasTraceMetric()) {
+      return !traceLimiter.check(metric);
+    } else {
+      // Should not reach here
+      return true;
+    }
+  }
+
+  /**
+   * Check if the {@link PerfMetric} should be sampled. A {@link PerfMetric} is considered sampled
+   * if the device isn't allowed to send the event type and it is not part of a verbose session.
    *
    * @param metric {@link PerfMetric} object.
    * @return true if allowed, false if not allowed.
    */
-  boolean check(PerfMetric metric) {
+  boolean isEventSampled(PerfMetric metric) {
     if (metric.hasTraceMetric()
-        && !isDeviceAllowedToSendTraces()
-        && !hasVerboseSessions(metric.getTraceMetric().getPerfSessionsList())) {
+        && !(isDeviceAllowedToSendTraces()
+            || hasVerboseSessions(metric.getTraceMetric().getPerfSessionsList()))) {
+      return false;
+    }
+
+    if (isFragmentScreenTrace(metric)
+        && !(isDeviceAllowedToSendFragmentScreenTraces()
+            || hasVerboseSessions(metric.getTraceMetric().getPerfSessionsList()))) {
       return false;
     }
 
     if (metric.hasNetworkRequestMetric()
-        && !isDeviceAllowedToSendNetworkEvents()
-        && !hasVerboseSessions(metric.getNetworkRequestMetric().getPerfSessionsList())) {
+        && !(isDeviceAllowedToSendNetworkEvents()
+            || hasVerboseSessions(metric.getNetworkRequestMetric().getPerfSessionsList()))) {
       return false;
     }
-
-    if (!isRateLimited(metric)) {
-      // Do not apply rate limiting on this metric.
-      return true;
-    }
-
-    if (metric.hasNetworkRequestMetric()) {
-      return networkLimiter.check(metric);
-    } else if (metric.hasTraceMetric()) {
-      return traceLimiter.check(metric);
-    } else {
-      return false;
-    }
+    return true;
   }
 
   /**
@@ -174,7 +209,7 @@ final class RateLimiter {
    * @param metric {@link PerfMetric} object.
    * @return true if applying rate limiting. false if not.
    */
-  boolean isRateLimited(@NonNull PerfMetric metric) {
+  boolean isRateLimitApplicable(@NonNull PerfMetric metric) {
     if (metric.hasTraceMetric()
         && (metric
                 .getTraceMetric()
@@ -208,6 +243,11 @@ final class RateLimiter {
     return isDeviceAllowedToSendNetworkEvents();
   }
 
+  @VisibleForTesting
+  boolean getIsDeviceAllowedToSendFragmentScreenTraces() {
+    return isDeviceAllowedToSendFragmentScreenTraces();
+  }
+
   /** The implementation of Token Bucket rate limiter. */
   static class RateLimiterImpl {
 
@@ -225,7 +265,7 @@ final class RateLimiter {
     // Token bucket capacity, also the initial number of tokens in the bucket.
     private long capacity;
     // Number of tokens in the bucket.
-    private long tokenCount;
+    private double tokenCount;
 
     private Rate foregroundRate;
     private Rate backgroundRate;
@@ -259,22 +299,16 @@ final class RateLimiter {
      */
     synchronized boolean check(@NonNull PerfMetric metric) {
       Timer now = clock.getTime();
-      long newTokens =
-          Math.max(
-              0,
-              (long)
-                  (lastTimeTokenReplenished.getDurationMicros(now)
-                      * rate.getTokensPerSeconds()
-                      / MICROS_IN_A_SECOND));
-      tokenCount = Math.min(tokenCount + newTokens, capacity);
-      if (newTokens > 0) {
-        lastTimeTokenReplenished =
-            new Timer(
-                lastTimeTokenReplenished.getMicros()
-                    + (long) (newTokens * MICROS_IN_A_SECOND / rate.getTokensPerSeconds()));
+      double newTokens =
+          (lastTimeTokenReplenished.getDurationMicros(now)
+              * rate.getTokensPerSeconds()
+              / MICROS_IN_A_SECOND);
+      if (newTokens > 0.0) {
+        tokenCount = Math.min(tokenCount + newTokens, capacity);
+        lastTimeTokenReplenished = now;
       }
-      if (tokenCount > 0) {
-        tokenCount--;
+      if (tokenCount >= 1.0) {
+        tokenCount -= 1.0;
         return true;
       }
       if (isLogcatEnabled) {

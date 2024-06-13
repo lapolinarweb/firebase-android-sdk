@@ -27,6 +27,8 @@ import java.lang.annotation.RetentionPolicy;
 public final class RemoteConfigConstants {
   public static final String FETCH_REGEX_URL =
       "https://firebaseremoteconfig.googleapis.com/v1/projects/%s/namespaces/%s:fetch";
+  public static final String REALTIME_REGEX_URL =
+      "https://firebaseremoteconfigrealtime.googleapis.com/v1/projects/%s/namespaces/%s:streamFetchInvalidations";
 
   /**
    * Keys of fields in the Fetch request body that the client sends to the Firebase Remote Config
@@ -48,7 +50,8 @@ public final class RemoteConfigConstants {
     RequestFieldKey.APP_VERSION,
     RequestFieldKey.PACKAGE_NAME,
     RequestFieldKey.SDK_VERSION,
-    RequestFieldKey.ANALYTICS_USER_PROPERTIES
+    RequestFieldKey.ANALYTICS_USER_PROPERTIES,
+    RequestFieldKey.FIRST_OPEN_TIME
   })
   @Retention(RetentionPolicy.SOURCE)
   public @interface RequestFieldKey {
@@ -64,6 +67,7 @@ public final class RemoteConfigConstants {
     String PACKAGE_NAME = "packageName";
     String SDK_VERSION = "sdkVersion";
     String ANALYTICS_USER_PROPERTIES = "analyticsUserProperties";
+    String FIRST_OPEN_TIME = "firstOpenTime";
   }
 
   /** Keys of fields in the Fetch response body from the Firebase Remote Config server. */
@@ -71,7 +75,9 @@ public final class RemoteConfigConstants {
     ResponseFieldKey.ENTRIES,
     ResponseFieldKey.EXPERIMENT_DESCRIPTIONS,
     ResponseFieldKey.PERSONALIZATION_METADATA,
-    ResponseFieldKey.STATE
+    ResponseFieldKey.STATE,
+    ResponseFieldKey.TEMPLATE_VERSION_NUMBER,
+    ResponseFieldKey.ROLLOUT_METADATA
   })
   @Retention(RetentionPolicy.SOURCE)
   public @interface ResponseFieldKey {
@@ -79,6 +85,8 @@ public final class RemoteConfigConstants {
     String EXPERIMENT_DESCRIPTIONS = "experimentDescriptions";
     String PERSONALIZATION_METADATA = "personalizationMetadata";
     String STATE = "state";
+    String TEMPLATE_VERSION_NUMBER = "templateVersion";
+    String ROLLOUT_METADATA = "rolloutMetadata";
   }
 
   /**

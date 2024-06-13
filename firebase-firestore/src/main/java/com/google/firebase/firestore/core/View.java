@@ -14,6 +14,8 @@
 
 package com.google.firebase.firestore.core;
 
+import static com.google.firebase.firestore.core.Query.LimitType.LIMIT_TO_FIRST;
+import static com.google.firebase.firestore.core.Query.LimitType.LIMIT_TO_LAST;
 import static com.google.firebase.firestore.util.Assert.hardAssert;
 import static com.google.firebase.firestore.util.Util.compareIntegers;
 
@@ -76,7 +78,7 @@ public class View {
   /**
    * A flag whether the view is current with the backend. A view is considered current after it has
    * seen the current flag from the backend and did not lose consistency within the watch stream
-   * (e.g. because of an existence filter mismatch).
+   * (for example because of an existence filter mismatch).
    */
   private boolean current;
 
@@ -147,11 +149,11 @@ public class View {
     // Note that this should never get used in a refill (when previousChanges is set), because there
     // will only be adds -- no deletes or updates.
     Document lastDocInLimit =
-        (query.hasLimitToFirst() && oldDocumentSet.size() == query.getLimitToFirst())
+        (query.getLimitType().equals(LIMIT_TO_FIRST) && oldDocumentSet.size() == query.getLimit())
             ? oldDocumentSet.getLastDocument()
             : null;
     Document firstDocInLimit =
-        (query.hasLimitToLast() && oldDocumentSet.size() == query.getLimitToLast())
+        (query.getLimitType().equals(LIMIT_TO_LAST) && oldDocumentSet.size() == query.getLimit())
             ? oldDocumentSet.getFirstDocument()
             : null;
 
@@ -222,11 +224,10 @@ public class View {
     }
 
     // Drop documents out to meet limitToFirst/limitToLast requirement.
-    if (query.hasLimitToFirst() || query.hasLimitToLast()) {
-      long limit = query.hasLimitToFirst() ? query.getLimitToFirst() : query.getLimitToLast();
-      for (long i = newDocumentSet.size() - limit; i > 0; --i) {
+    if (query.hasLimit()) {
+      for (long i = newDocumentSet.size() - query.getLimit(); i > 0; --i) {
         Document oldDoc =
-            query.hasLimitToFirst()
+            query.getLimitType().equals(LIMIT_TO_FIRST)
                 ? newDocumentSet.getLastDocument()
                 : newDocumentSet.getFirstDocument();
         newDocumentSet = newDocumentSet.remove(oldDoc.getKey());
@@ -244,11 +245,11 @@ public class View {
 
   private boolean shouldWaitForSyncedDocument(Document oldDoc, Document newDoc) {
     // We suppress the initial change event for documents that were modified as part of a write
-    // acknowledgment (e.g. when the value of a server transform is applied) as Watch will send us
-    // the same document again. By suppressing the event, we only raise two user visible events (one
-    // with `hasPendingWrites` and the final state of the document) instead of three (one with
-    // `hasPendingWrites`, the modified document with `hasPendingWrites` and the final state of the
-    // document).
+    // acknowledgment (for example when the value of a server transform is applied) as Watch will
+    // send us the same document again. By suppressing the event, we only raise two user visible
+    // events (one with `hasPendingWrites` and the final state of the document) instead of three
+    // (one with `hasPendingWrites`, the modified document with `hasPendingWrites` and the final
+    // state of the document).
     return (oldDoc.hasLocalMutations()
         && newDoc.hasCommittedMutations()
         && !newDoc.hasLocalMutations());
@@ -274,6 +275,21 @@ public class View {
    * @return A new ViewChange with the given docs, changes, and sync state.
    */
   public ViewChange applyChanges(DocumentChanges docChanges, TargetChange targetChange) {
+    return applyChanges(docChanges, targetChange, false);
+  }
+
+  /**
+   * Updates the view with the given ViewDocumentChanges and updates limbo docs and sync state from
+   * the given (optional) target change.
+   *
+   * @param docChanges The set of changes to make to the view's docs.
+   * @param targetChange A target change to apply for computing limbo docs and sync state.
+   * @param targetIsPendingReset - Whether the target is pending to reset due to existence filter
+   *     mismatch. If not explicitly specified, it is treated equivalently to `false`.
+   * @return A new ViewChange with the given docs, changes, and sync state.
+   */
+  public ViewChange applyChanges(
+      DocumentChanges docChanges, TargetChange targetChange, boolean targetIsPendingReset) {
     hardAssert(!docChanges.needsRefill, "Cannot apply changes that need a refill");
 
     DocumentSet oldDocumentSet = documentSet;
@@ -286,21 +302,27 @@ public class View {
         viewChanges,
         (DocumentViewChange o1, DocumentViewChange o2) -> {
           int typeComp = compareIntegers(View.changeTypeOrder(o1), View.changeTypeOrder(o2));
-          o1.getType().compareTo(o2.getType());
           if (typeComp != 0) {
             return typeComp;
           }
           return query.comparator().compare(o1.getDocument(), o2.getDocument());
         });
     applyTargetChange(targetChange);
-    List<LimboDocumentChange> limboDocumentChanges = updateLimboDocuments();
-    boolean synced = limboDocuments.size() == 0 && current;
+    List<LimboDocumentChange> limboDocumentChanges =
+        targetIsPendingReset ? Collections.emptyList() : updateLimboDocuments();
+
+    // We are at synced state if there is no limbo docs are waiting to be resolved, view is current
+    // with the backend, and the query is not pending to reset due to existence filter mismatch.
+    boolean synced = limboDocuments.size() == 0 && current && !targetIsPendingReset;
     SyncState newSyncState = synced ? SyncState.SYNCED : SyncState.LOCAL;
     boolean syncStatedChanged = newSyncState != syncState;
     syncState = newSyncState;
     ViewSnapshot snapshot = null;
+
     if (viewChanges.size() != 0 || syncStatedChanged) {
       boolean fromCache = newSyncState == SyncState.LOCAL;
+      boolean hasCachedResults =
+          targetChange == null ? false : !targetChange.getResumeToken().isEmpty();
       snapshot =
           new ViewSnapshot(
               query,
@@ -310,7 +332,8 @@ public class View {
               fromCache,
               docChanges.mutatedKeys,
               syncStatedChanged,
-              /* excludesMetadataChanges= */ false);
+              /* excludesMetadataChanges= */ false,
+              hasCachedResults);
     }
     return new ViewChange(snapshot, limboDocumentChanges);
   }

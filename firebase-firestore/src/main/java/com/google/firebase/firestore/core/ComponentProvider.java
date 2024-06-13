@@ -14,6 +14,8 @@
 
 package com.google.firebase.firestore.core;
 
+import static com.google.firebase.firestore.util.Assert.hardAssertNonNull;
+
 import android.content.Context;
 import androidx.annotation.Nullable;
 import com.google.firebase.firestore.FirebaseFirestoreSettings;
@@ -40,7 +42,7 @@ public abstract class ComponentProvider {
   private RemoteStore remoteStore;
   private EventManager eventManager;
   private ConnectivityMonitor connectivityMonitor;
-  private IndexBackfiller indexBackfiller;
+  @Nullable private IndexBackfiller indexBackfiller;
   @Nullable private Scheduler garbageCollectionScheduler;
 
   /** Configuration options for the component provider. */
@@ -101,7 +103,7 @@ public abstract class ComponentProvider {
   }
 
   public Persistence getPersistence() {
-    return persistence;
+    return hardAssertNonNull(persistence, "persistence not initialized yet");
   }
 
   @Nullable
@@ -109,34 +111,43 @@ public abstract class ComponentProvider {
     return garbageCollectionScheduler;
   }
 
+  @Nullable
   public IndexBackfiller getIndexBackfiller() {
     return indexBackfiller;
   }
 
   public LocalStore getLocalStore() {
-    return localStore;
+    return hardAssertNonNull(localStore, "localStore not initialized yet");
   }
 
   public SyncEngine getSyncEngine() {
-    return syncEngine;
+    return hardAssertNonNull(syncEngine, "syncEngine not initialized yet");
   }
 
   public RemoteStore getRemoteStore() {
-    return remoteStore;
+    return hardAssertNonNull(remoteStore, "remoteStore not initialized yet");
   }
 
   public EventManager getEventManager() {
-    return eventManager;
+    return hardAssertNonNull(eventManager, "eventManager not initialized yet");
   }
 
   protected ConnectivityMonitor getConnectivityMonitor() {
-    return connectivityMonitor;
+    return hardAssertNonNull(connectivityMonitor, "connectivityMonitor not initialized yet");
   }
 
   public void initialize(Configuration configuration) {
+    /**
+     * The order in which components are created is important.
+     *
+     * <p>The implementation of abstract createX methods (for example createRemoteStore) will call
+     * the getX methods (for example getLocalStore). Consequently, creating components out of order
+     * will cause createX method to fail because a dependency is null.
+     *
+     * <p>To catch incorrect order, all getX methods have runtime check for null.
+     */
     persistence = createPersistence(configuration);
     persistence.start();
-    indexBackfiller = createIndexBackfiller(configuration);
     localStore = createLocalStore(configuration);
     connectivityMonitor = createConnectivityMonitor(configuration);
     remoteStore = createRemoteStore(configuration);
@@ -145,6 +156,7 @@ public abstract class ComponentProvider {
     localStore.start();
     remoteStore.start();
     garbageCollectionScheduler = createGarbageCollectionScheduler(configuration);
+    indexBackfiller = createIndexBackfiller(configuration);
   }
 
   protected abstract Scheduler createGarbageCollectionScheduler(Configuration configuration);

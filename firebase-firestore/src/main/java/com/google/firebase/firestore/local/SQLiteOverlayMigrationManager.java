@@ -39,9 +39,6 @@ public class SQLiteOverlayMigrationManager implements OverlayMigrationManager {
 
   @Override
   public void run() {
-    if (Persistence.OVERLAY_SUPPORT_ENABLED == false || !hasPendingOverlayMigration()) {
-      return;
-    }
     buildOverlays();
   }
 
@@ -49,6 +46,10 @@ public class SQLiteOverlayMigrationManager implements OverlayMigrationManager {
     db.runTransaction(
         "build overlays",
         () -> {
+          if (!hasPendingOverlayMigration()) {
+            return;
+          }
+
           Set<String> userIds = getAllUserIds();
           RemoteDocumentCache remoteDocumentCache = db.getRemoteDocumentCache();
           for (String uid : userIds) {
@@ -63,7 +64,7 @@ public class SQLiteOverlayMigrationManager implements OverlayMigrationManager {
             }
 
             // Recalculate and save overlays
-            DocumentOverlayCache documentOverlayCache = db.getDocumentOverlay(user);
+            DocumentOverlayCache documentOverlayCache = db.getDocumentOverlayCache(user);
             LocalDocumentsView localView =
                 new LocalDocumentsView(
                     remoteDocumentCache,

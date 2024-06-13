@@ -17,16 +17,23 @@ package com.google.firebase.firestore.local;
 import static com.google.firebase.firestore.model.Values.isArray;
 import static com.google.firebase.firestore.util.Assert.fail;
 import static com.google.firebase.firestore.util.Assert.hardAssert;
+import static com.google.firebase.firestore.util.LogicUtils.getDnfTerms;
 import static com.google.firebase.firestore.util.Util.diffCollections;
 import static com.google.firebase.firestore.util.Util.repeatSequence;
 import static java.lang.Math.max;
 
+import android.text.TextUtils;
+import android.util.Pair;
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import com.google.firebase.Timestamp;
+import com.google.firebase.database.collection.ImmutableSortedMap;
 import com.google.firebase.firestore.auth.User;
 import com.google.firebase.firestore.core.Bound;
+import com.google.firebase.firestore.core.CompositeFilter;
 import com.google.firebase.firestore.core.FieldFilter;
 import com.google.firebase.firestore.core.Filter;
+import com.google.firebase.firestore.core.OrderBy.Direction;
 import com.google.firebase.firestore.core.Target;
 import com.google.firebase.firestore.index.DirectionalIndexByteEncoder;
 import com.google.firebase.firestore.index.FirestoreIndexValueWriter;
@@ -35,6 +42,7 @@ import com.google.firebase.firestore.index.IndexEntry;
 import com.google.firebase.firestore.model.Document;
 import com.google.firebase.firestore.model.DocumentKey;
 import com.google.firebase.firestore.model.FieldIndex;
+import com.google.firebase.firestore.model.FieldIndex.IndexOffset;
 import com.google.firebase.firestore.model.FieldPath;
 import com.google.firebase.firestore.model.ResourcePath;
 import com.google.firebase.firestore.model.SnapshotVersion;
@@ -44,26 +52,33 @@ import com.google.firestore.admin.v1.Index;
 import com.google.firestore.v1.Value;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Queue;
-import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
 
 /** A persisted implementation of IndexManager. */
 final class SQLiteIndexManager implements IndexManager {
   private static final String TAG = SQLiteIndexManager.class.getSimpleName();
+  private static final byte[] EMPTY_BYTES_VALUE = new byte[] {};
 
   private final SQLitePersistence db;
   private final LocalSerializer serializer;
   private final String uid;
+
+  /**
+   * Maps from a target to its equivalent list of sub-targets. Each sub-target contains only one
+   * term from the target's disjunctive normal form (DNF).
+   */
+  // TODO(orquery): Find a way for the GC algorithm to remove the mapping once we remove a target.
+  private final Map<Target, List<Target>> targetToDnfSubTargets = new HashMap<>();
 
   /**
    * An in-memory copy of the index entries we've already written since the SDK launched. Used to
@@ -79,9 +94,15 @@ final class SQLiteIndexManager implements IndexManager {
   private final Queue<FieldIndex> nextIndexToUpdate =
       new PriorityQueue<>(
           10,
-          (l, r) ->
-              Long.compare(
-                  l.getIndexState().getSequenceNumber(), r.getIndexState().getSequenceNumber()));
+          (l, r) -> {
+            int sequenceCmp =
+                Long.compare(
+                    l.getIndexState().getSequenceNumber(), r.getIndexState().getSequenceNumber());
+            if (sequenceCmp == 0) {
+              return l.getCollectionGroup().compareTo(r.getCollectionGroup());
+            }
+            return sequenceCmp;
+          });
 
   private boolean started = false;
   private int memoizedMaxIndexId = -1;
@@ -95,18 +116,13 @@ final class SQLiteIndexManager implements IndexManager {
 
   @Override
   public void start() {
-    if (!Persistence.INDEXING_SUPPORT_ENABLED) {
-      started = true;
-      return;
-    }
-
     Map<Integer, FieldIndex.IndexState> indexStates = new HashMap<>();
 
     // Fetch all index states if persisted for the user. These states contain per user information
     // on how up to date the index is.
     db.query(
-            "SELECT index_id, sequence_number, read_time_seconds, read_time_nanos, document_key "
-                + "FROM index_state WHERE uid = ?")
+            "SELECT index_id, sequence_number, read_time_seconds, read_time_nanos, document_key, "
+                + "largest_batch_id FROM index_state WHERE uid = ?")
         .binding(uid)
         .forEach(
             row -> {
@@ -116,8 +132,11 @@ final class SQLiteIndexManager implements IndexManager {
                   new SnapshotVersion(new Timestamp(row.getLong(2), row.getInt(3)));
               DocumentKey documentKey =
                   DocumentKey.fromPath(EncodedPath.decodeResourcePath(row.getString(4)));
+              int largestBatchId = row.getInt(5);
               indexStates.put(
-                  indexId, FieldIndex.IndexState.create(sequenceNumber, readTime, documentKey));
+                  indexId,
+                  FieldIndex.IndexState.create(
+                      sequenceNumber, readTime, documentKey, largestBatchId));
             });
 
     // Fetch all indices and combine with user's index state if available.
@@ -131,8 +150,8 @@ final class SQLiteIndexManager implements IndexManager {
                     serializer.decodeFieldIndexSegments(Index.parseFrom(row.getBlob(2)));
 
                 // If we fetched an index state for the user above, combine it with this index.
-                // We use the default state if we don't have an index state (e.g. the index was
-                // created while a different user as logged in).
+                // We use the default state if we don't have an index state (for example, if the
+                // index was created while a different user as logged in).
                 FieldIndex.IndexState indexState =
                     indexStates.containsKey(indexId)
                         ? indexStates.get(indexId)
@@ -205,12 +224,38 @@ final class SQLiteIndexManager implements IndexManager {
   public void deleteFieldIndex(FieldIndex index) {
     db.execute("DELETE FROM index_configuration WHERE index_id = ?", index.getIndexId());
     db.execute("DELETE FROM index_entries WHERE index_id = ?", index.getIndexId());
-    db.execute("DELETE FROM index_state WHERE index_id = ?", index.getIndexState());
+    db.execute("DELETE FROM index_state WHERE index_id = ?", index.getIndexId());
 
     nextIndexToUpdate.remove(index);
     Map<Integer, FieldIndex> collectionIndices = memoizedIndexes.get(index.getCollectionGroup());
     if (collectionIndices != null) {
       collectionIndices.remove(index.getIndexId());
+    }
+  }
+
+  @Override
+  public void deleteAllFieldIndexes() {
+    db.execute("DELETE FROM index_configuration");
+    db.execute("DELETE FROM index_entries");
+    db.execute("DELETE FROM index_state");
+
+    nextIndexToUpdate.clear();
+    memoizedIndexes.clear();
+  }
+
+  @Override
+  public void createTargetIndexes(Target target) {
+    hardAssert(started, "IndexManager not started");
+
+    for (Target subTarget : getSubTargets(target)) {
+      IndexType type = getIndexType(subTarget);
+      if (type == IndexType.NONE || type == IndexType.PARTIAL) {
+        TargetIndexMatcher targetIndexMatcher = new TargetIndexMatcher(subTarget);
+        FieldIndex fieldIndex = targetIndexMatcher.buildTargetIndex();
+        if (fieldIndex != null) {
+          addFieldIndex(fieldIndex);
+        }
+      }
     }
   }
 
@@ -222,16 +267,16 @@ final class SQLiteIndexManager implements IndexManager {
   }
 
   @Override
-  public void updateIndexEntries(Collection<Document> documents) {
+  public void updateIndexEntries(ImmutableSortedMap<DocumentKey, Document> documents) {
     hardAssert(started, "IndexManager not started");
-    for (Document document : documents) {
-      Collection<FieldIndex> fieldIndexes = getFieldIndexes(document.getKey().getCollectionGroup());
+
+    for (Map.Entry<DocumentKey, Document> entry : documents) {
+      Collection<FieldIndex> fieldIndexes = getFieldIndexes(entry.getKey().getCollectionGroup());
       for (FieldIndex fieldIndex : fieldIndexes) {
-        SortedSet<IndexEntry> existingEntries =
-            getExistingIndexEntries(document.getKey(), fieldIndex);
-        SortedSet<IndexEntry> newEntries = computeIndexEntries(document, fieldIndex);
+        SortedSet<IndexEntry> existingEntries = getExistingIndexEntries(entry.getKey(), fieldIndex);
+        SortedSet<IndexEntry> newEntries = computeIndexEntries(entry.getValue(), fieldIndex);
         if (!existingEntries.equals(newEntries)) {
-          updateEntries(document, existingEntries, newEntries);
+          updateEntries(entry.getValue(), existingEntries, newEntries);
         }
       }
     }
@@ -265,6 +310,101 @@ final class SQLiteIndexManager implements IndexManager {
       allIndices.addAll(indices.values());
     }
     return allIndices;
+  }
+
+  private IndexOffset getMinOffset(Collection<FieldIndex> fieldIndexes) {
+    hardAssert(
+        !fieldIndexes.isEmpty(),
+        "Found empty index group when looking for least recent index offset.");
+
+    Iterator<FieldIndex> it = fieldIndexes.iterator();
+    IndexOffset minOffset = it.next().getIndexState().getOffset();
+    int maxBatchId = minOffset.getLargestBatchId();
+    while (it.hasNext()) {
+      IndexOffset newOffset = it.next().getIndexState().getOffset();
+      if (newOffset.compareTo(minOffset) < 0) {
+        minOffset = newOffset;
+      }
+      maxBatchId = Math.max(newOffset.getLargestBatchId(), maxBatchId);
+    }
+
+    return IndexOffset.create(minOffset.getReadTime(), minOffset.getDocumentKey(), maxBatchId);
+  }
+
+  @Override
+  public IndexOffset getMinOffset(String collectionGroup) {
+    Collection<FieldIndex> fieldIndexes = getFieldIndexes(collectionGroup);
+    hardAssert(!fieldIndexes.isEmpty(), "minOffset was called for collection without indexes");
+    return getMinOffset(fieldIndexes);
+  }
+
+  @Override
+  public IndexType getIndexType(Target target) {
+    IndexType result = IndexType.FULL;
+    List<Target> subTargets = getSubTargets(target);
+
+    for (Target subTarget : subTargets) {
+      FieldIndex index = getFieldIndex(subTarget);
+      if (index == null) {
+        result = IndexType.NONE;
+        break;
+      }
+
+      if (index.getSegments().size() < subTarget.getSegmentCount()) {
+        result = IndexType.PARTIAL;
+      }
+    }
+
+    // OR queries have more than one sub-target (one sub-target per DNF term). We currently consider
+    // OR queries that have a `limit` to have a partial index. For such queries we perform sorting
+    // and apply the limit in memory as a post-processing step.
+    // TODO(orquery): If we have a FULL index *and* we have the index that can be used for sorting
+    //  all DNF branches on the same value, we can improve performance by performing a JOIN in SQL.
+    //  See b/235224019 for more information.
+    if (target.hasLimit() && subTargets.size() > 1 && result == IndexType.FULL) {
+      return IndexType.PARTIAL;
+    }
+
+    return result;
+  }
+
+  @Override
+  public IndexOffset getMinOffset(Target target) {
+    List<FieldIndex> fieldIndexes = new ArrayList<>();
+    for (Target subTarget : getSubTargets(target)) {
+      FieldIndex index = getFieldIndex(subTarget);
+      if (index != null) {
+        fieldIndexes.add(index);
+      }
+    }
+    return getMinOffset(fieldIndexes);
+  }
+
+  private List<Target> getSubTargets(Target target) {
+    if (targetToDnfSubTargets.containsKey(target)) {
+      return targetToDnfSubTargets.get(target);
+    }
+    List<Target> subTargets = new ArrayList<>();
+    if (target.getFilters().isEmpty()) {
+      subTargets.add(target);
+    } else {
+      // There is an implicit AND operation between all the filters stored in the target.
+      List<Filter> dnf =
+          getDnfTerms(new CompositeFilter(target.getFilters(), CompositeFilter.Operator.AND));
+      for (Filter term : dnf) {
+        subTargets.add(
+            new Target(
+                target.getPath(),
+                target.getCollectionGroup(),
+                term.getFilters(),
+                target.getOrderBy(),
+                target.getLimit(),
+                target.getStartAt(),
+                target.getEndAt()));
+      }
+    }
+    targetToDnfSubTargets.put(target, subTargets);
+    return subTargets;
   }
 
   /**
@@ -323,7 +463,7 @@ final class SQLiteIndexManager implements IndexManager {
 
   private void addIndexEntry(Document document, IndexEntry indexEntry) {
     db.execute(
-        "INSERT INTO index_entries (index_id, uid, array_value, directional_value, document_name) "
+        "INSERT INTO index_entries (index_id, uid, array_value, directional_value, document_key) "
             + "VALUES(?, ?, ?, ?, ?)",
         indexEntry.getIndexId(),
         uid,
@@ -335,7 +475,7 @@ final class SQLiteIndexManager implements IndexManager {
   private void deleteIndexEntry(Document document, IndexEntry indexEntry) {
     db.execute(
         "DELETE FROM index_entries WHERE index_id = ? AND uid = ? AND array_value = ? "
-            + "AND directional_value = ? AND document_name = ?",
+            + "AND directional_value = ? AND document_key = ?",
         indexEntry.getIndexId(),
         uid,
         indexEntry.getArrayValue(),
@@ -348,7 +488,7 @@ final class SQLiteIndexManager implements IndexManager {
     SortedSet<IndexEntry> results = new TreeSet<>();
     db.query(
             "SELECT array_value, directional_value FROM index_entries "
-                + "WHERE index_id = ? AND document_name = ? AND uid = ?")
+                + "WHERE index_id = ? AND document_key = ? AND uid = ?")
         .binding(fieldIndex.getIndexId(), documentKey.toString(), uid)
         .forEach(
             row ->
@@ -359,43 +499,86 @@ final class SQLiteIndexManager implements IndexManager {
   }
 
   @Override
-  public Set<DocumentKey> getDocumentsMatchingTarget(FieldIndex fieldIndex, Target target) {
+  public List<DocumentKey> getDocumentsMatchingTarget(Target target) {
     hardAssert(started, "IndexManager not started");
 
-    @Nullable List<Value> arrayValues = target.getArrayValues(fieldIndex);
-    @Nullable List<Value> notInValues = target.getNotInValues(fieldIndex);
-    @Nullable Bound lowerBound = target.getLowerBound(fieldIndex);
-    @Nullable Bound upperBound = target.getUpperBound(fieldIndex);
+    List<String> subQueries = new ArrayList<>();
+    List<Object> bindings = new ArrayList<>();
+    List<Pair<Target, FieldIndex>> indexes = new ArrayList<>();
 
-    if (Logger.isDebugEnabled()) {
-      Logger.debug(
-          TAG,
-          "Using index '%s' to execute '%s' (Arrays: %s, Lower bound: %s, Upper bound: %s)",
-          fieldIndex,
-          target,
-          arrayValues,
-          lowerBound,
-          upperBound);
+    for (Target subTarget : getSubTargets(target)) {
+      FieldIndex fieldIndex = getFieldIndex(subTarget);
+      if (fieldIndex == null) {
+        return null;
+      }
+      indexes.add(Pair.create(subTarget, fieldIndex));
     }
 
-    Object[] lowerBoundEncoded = encodeBound(fieldIndex, target, lowerBound);
-    String lowerBoundOp = lowerBound != null && lowerBound.isInclusive() ? ">=" : ">";
-    Object[] upperBoundEncoded = encodeBound(fieldIndex, target, upperBound);
-    String upperBoundOp = upperBound != null && upperBound.isInclusive() ? "<=" : "<";
-    Object[] notInEncoded = encodeValues(fieldIndex, target, notInValues);
+    for (Pair<Target, FieldIndex> pair : indexes) {
+      Target subTarget = pair.first;
+      @NonNull FieldIndex fieldIndex = pair.second;
+      @Nullable List<Value> arrayValues = subTarget.getArrayValues(fieldIndex);
+      @Nullable Collection<Value> notInValues = subTarget.getNotInValues(fieldIndex);
+      Bound lowerBound = subTarget.getLowerBound(fieldIndex);
+      Bound upperBound = subTarget.getUpperBound(fieldIndex);
 
-    SQLitePersistence.Query query =
-        generateQuery(
-            target,
-            fieldIndex.getIndexId(),
+      if (Logger.isDebugEnabled()) {
+        Logger.debug(
+            TAG,
+            "Using index '%s' to execute '%s' (Arrays: %s, Lower bound: %s, Upper bound: %s)",
+            fieldIndex,
+            subTarget,
             arrayValues,
-            lowerBoundEncoded,
-            lowerBoundOp,
-            upperBoundEncoded,
-            upperBoundOp,
-            notInEncoded);
+            lowerBound,
+            upperBound);
+      }
 
-    Set<DocumentKey> result = new HashSet<>();
+      Object[] lowerBoundEncoded = encodeBound(fieldIndex, subTarget, lowerBound);
+      String lowerBoundOp = lowerBound.isInclusive() ? ">=" : ">";
+      Object[] upperBoundEncoded = encodeBound(fieldIndex, subTarget, upperBound);
+      String upperBoundOp = upperBound.isInclusive() ? "<=" : "<";
+      Object[] notInEncoded = encodeValues(fieldIndex, subTarget, notInValues);
+
+      Object[] subQueryAndBindings =
+          generateQueryAndBindings(
+              subTarget,
+              fieldIndex.getIndexId(),
+              arrayValues,
+              lowerBoundEncoded,
+              lowerBoundOp,
+              upperBoundEncoded,
+              upperBoundOp,
+              notInEncoded);
+      subQueries.add(String.valueOf(subQueryAndBindings[0]));
+      bindings.addAll(Arrays.asList(subQueryAndBindings).subList(1, subQueryAndBindings.length));
+    }
+
+    // We are constructing:
+    // SELECT DISTINCT document_key FROM (
+    //   (SELECT ...) UNION (SELECT ...) UNION (SELECT ...)
+    //   ORDER BY ...
+    // )
+    // LIMIT ...
+    //
+    // Note: SQLite does not allow performing ORDER BY on each union clause. The ORDER BY must come
+    // after the last union clause. Also note that LIMIT must be applied *after* the DISTINCT
+    // operator has been performed. When dealing with multiple sub-targets, it's possible that the
+    // same document_key appears multiple times.
+    String unionSubTargets =
+        TextUtils.join(" UNION ", subQueries)
+            + "ORDER BY directional_value, document_key "
+            + (target.getKeyOrder().equals(Direction.ASCENDING) ? "asc " : "desc ");
+
+    String queryString = "SELECT DISTINCT document_key FROM (" + unionSubTargets + ")";
+    if (target.hasLimit()) {
+      queryString = queryString + " LIMIT " + target.getLimit();
+    }
+
+    hardAssert(bindings.size() < 1000, "Cannot perform query with more than 999 bind elements");
+
+    SQLitePersistence.Query query = db.query(queryString).binding(bindings.toArray());
+
+    List<DocumentKey> result = new ArrayList<>();
     query.forEach(
         row -> result.add(DocumentKey.fromPath(ResourcePath.fromString(row.getString(0)))));
 
@@ -403,14 +586,17 @@ final class SQLiteIndexManager implements IndexManager {
     return result;
   }
 
-  /** Returns a SQL query on 'index_entries' that unions all bounds. */
-  private SQLitePersistence.Query generateQuery(
+  /**
+   * Constructs a SQL query on 'index_entries' that unions all bounds. Returns an array with SQL
+   * query string as the first element, followed by binding arguments.
+   */
+  private Object[] generateQueryAndBindings(
       Target target,
       int indexId,
       @Nullable List<Value> arrayValues,
-      @Nullable Object[] lowerBounds,
+      Object[] lowerBounds,
       String lowerBoundOp,
-      @Nullable Object[] upperBounds,
+      Object[] upperBounds,
       String upperBoundOp,
       @Nullable Object[] notIn) {
     // The number of total statements we union together. This is similar to a distributed normal
@@ -418,36 +604,23 @@ final class SQLiteIndexManager implements IndexManager {
     // ARRAY_CONTAINS or ARRAY_CONTAINS_ANY filter combined with the values from the query bounds.
     int statementCount =
         (arrayValues != null ? arrayValues.size() : 1)
-            * max(
-                lowerBounds != null ? lowerBounds.length : 1,
-                upperBounds != null ? upperBounds.length : 1);
+            * max(lowerBounds.length, upperBounds.length);
 
     // Build the statement. We always include the lower bound, and optionally include an array value
     // and an upper bound.
     StringBuilder statement = new StringBuilder();
-    statement.append("SELECT document_name, directional_value FROM index_entries ");
+    statement.append("SELECT document_key, directional_value FROM index_entries ");
     statement.append("WHERE index_id = ? AND uid = ? ");
-    if (arrayValues != null) {
-      statement.append("AND array_value = ? ");
-    }
-    if (lowerBounds != null) {
-      statement.append("AND directional_value ").append(lowerBoundOp).append(" ? ");
-    }
-    if (upperBounds != null) {
-      statement.append("AND directional_value ").append(upperBoundOp).append(" ? ");
-    }
+    statement.append("AND array_value = ? ");
+    statement.append("AND directional_value ").append(lowerBoundOp).append(" ? ");
+    statement.append("AND directional_value ").append(upperBoundOp).append(" ? ");
 
-    // Create the UNION statement by repeating the above generated statement. We can then add
-    // ordering and a limit clause.
+    // Create the UNION statement by repeating the above generated statement.
     StringBuilder sql = repeatSequence(statement, statementCount, " UNION ");
-    sql.append(" ORDER BY directional_value, document_name ");
-    if (target.getLimit() != -1) {
-      sql.append("LIMIT ").append(target.getLimit()).append(" ");
-    }
 
     if (notIn != null) {
       // Wrap the statement in a NOT-IN call.
-      sql = new StringBuilder("SELECT document_name, directional_value FROM (").append(sql);
+      sql = new StringBuilder("SELECT document_key, directional_value FROM (").append(sql);
       sql.append(") WHERE directional_value NOT IN (");
       sql.append(repeatSequence("?", notIn.length, ", "));
       sql.append(")");
@@ -456,7 +629,11 @@ final class SQLiteIndexManager implements IndexManager {
     // Fill in the bind ("question marks") variables.
     Object[] bindArgs =
         fillBounds(statementCount, indexId, arrayValues, lowerBounds, upperBounds, notIn);
-    return db.query(sql.toString()).binding(bindArgs);
+
+    List<Object> result = new ArrayList<>();
+    result.add(sql.toString());
+    result.addAll(Arrays.asList(bindArgs));
+    return result.toArray();
   }
 
   /** Returns the bind arguments for all {@code statementCount} statements. */
@@ -464,14 +641,11 @@ final class SQLiteIndexManager implements IndexManager {
       int statementCount,
       int indexId,
       @Nullable List<Value> arrayValues,
-      @Nullable Object[] lowerBounds,
-      @Nullable Object[] upperBounds,
+      Object[] lowerBounds,
+      Object[] upperBounds,
       @Nullable Object[] notInValues) {
-    int bindsPerStatement =
-        2
-            + (arrayValues != null ? 1 : 0)
-            + (lowerBounds != null ? 1 : 0)
-            + (upperBounds != null ? 1 : 0);
+    // Every SQL statement we union together have 5 binds, see generateQueryAndBindings.
+    int bindsPerStatement = 5;
     int statementsPerArrayValue = statementCount / (arrayValues != null ? arrayValues.size() : 1);
 
     Object[] bindArgs =
@@ -481,15 +655,13 @@ final class SQLiteIndexManager implements IndexManager {
     for (int i = 0; i < statementCount; ++i) {
       bindArgs[offset++] = indexId;
       bindArgs[offset++] = uid;
-      if (arrayValues != null) {
-        bindArgs[offset++] = encodeSingleElement(arrayValues.get(i / statementsPerArrayValue));
-      }
-      if (lowerBounds != null) {
-        bindArgs[offset++] = lowerBounds[i % statementsPerArrayValue];
-      }
-      if (upperBounds != null) {
-        bindArgs[offset++] = upperBounds[i % statementsPerArrayValue];
-      }
+      bindArgs[offset++] =
+          arrayValues != null
+              ? encodeSingleElement(arrayValues.get(i / statementsPerArrayValue))
+              : EMPTY_BYTES_VALUE;
+
+      bindArgs[offset++] = lowerBounds[i % statementsPerArrayValue];
+      bindArgs[offset++] = upperBounds[i % statementsPerArrayValue];
     }
     if (notInValues != null) {
       for (Object notInValue : notInValues) {
@@ -499,9 +671,12 @@ final class SQLiteIndexManager implements IndexManager {
     return bindArgs;
   }
 
+  /**
+   * Returns an index that can be used to serve the provided target. Returns {@code null} if no
+   * index is configured.
+   */
   @Nullable
-  @Override
-  public FieldIndex getFieldIndex(Target target) {
+  private FieldIndex getFieldIndex(Target target) {
     hardAssert(started, "IndexManager not started");
 
     TargetIndexMatcher targetIndexMatcher = new TargetIndexMatcher(target);
@@ -515,21 +690,17 @@ final class SQLiteIndexManager implements IndexManager {
       return null;
     }
 
-    List<FieldIndex> matchingIndexes = new ArrayList<>();
+    // Return the index with the most number of segments.
+    FieldIndex matchingIndex = null;
     for (FieldIndex fieldIndex : collectionIndexes) {
       boolean matches = targetIndexMatcher.servedByIndex(fieldIndex);
-      if (matches) {
-        matchingIndexes.add(fieldIndex);
+      if (matches
+          && (matchingIndex == null
+              || fieldIndex.getSegments().size() > matchingIndex.getSegments().size())) {
+        matchingIndex = fieldIndex;
       }
     }
-
-    if (matchingIndexes.isEmpty()) {
-      return null;
-    }
-
-    // Return the index with the most number of segments
-    return Collections.max(
-        matchingIndexes, (l, r) -> Integer.compare(l.getSegments().size(), r.getSegments().size()));
+    return matchingIndex;
   }
 
   /**
@@ -562,13 +733,13 @@ final class SQLiteIndexManager implements IndexManager {
    * queries, a list of possible values is returned.
    */
   private @Nullable Object[] encodeValues(
-      FieldIndex fieldIndex, Target target, @Nullable List<Value> bound) {
-    if (bound == null) return null;
+      FieldIndex fieldIndex, Target target, @Nullable Collection<Value> values) {
+    if (values == null) return null;
 
     List<IndexByteEncoder> encoders = new ArrayList<>();
     encoders.add(new IndexByteEncoder());
 
-    Iterator<Value> position = bound.iterator();
+    Iterator<Value> position = values.iterator();
     for (FieldIndex.Segment segment : fieldIndex.getDirectionalSegments()) {
       Value value = position.next();
       for (IndexByteEncoder encoder : encoders) {
@@ -587,9 +758,7 @@ final class SQLiteIndexManager implements IndexManager {
    * Encodes the given bounds according to the specification in {@code target}. For IN queries, a
    * list of possible values is returned.
    */
-  private @Nullable Object[] encodeBound(
-      FieldIndex fieldIndex, Target target, @Nullable Bound bound) {
-    if (bound == null) return null;
+  private Object[] encodeBound(FieldIndex fieldIndex, Target target, Bound bound) {
     return encodeValues(fieldIndex, target, bound.getPosition());
   }
 
@@ -605,7 +774,7 @@ final class SQLiteIndexManager implements IndexManager {
   /**
    * Creates a separate encoder for each element of an array.
    *
-   * <p>The method appends each value to all existing encoders (e.g. filter("a", "==",
+   * <p>The method appends each value to all existing encoders (for example, filter("a", "==",
    * "a1").filter("b", "in", ["b1", "b2"]) becomes ["a1,b1", "a1,b2"]). A list of new encoders is
    * returned.
    */
@@ -627,9 +796,12 @@ final class SQLiteIndexManager implements IndexManager {
 
   private boolean isInFilter(Target target, FieldPath fieldPath) {
     for (Filter filter : target.getFilters()) {
-      if (filter.getField().equals(fieldPath)) {
-        Filter.Operator operator = ((FieldFilter) filter).getOperator();
-        return operator.equals(Filter.Operator.IN) || operator.equals(Filter.Operator.NOT_IN);
+      if ((filter instanceof FieldFilter) && ((FieldFilter) filter).getField().equals(fieldPath)) {
+        FieldFilter.Operator operator = ((FieldFilter) filter).getOperator();
+        if (operator.equals(FieldFilter.Operator.IN)
+            || operator.equals(FieldFilter.Operator.NOT_IN)) {
+          return true;
+        }
       }
     }
     return false;
@@ -640,7 +812,7 @@ final class SQLiteIndexManager implements IndexManager {
   }
 
   @Override
-  public void updateCollectionGroup(String collectionGroup, FieldIndex.IndexOffset offset) {
+  public void updateCollectionGroup(String collectionGroup, IndexOffset offset) {
     hardAssert(started, "IndexManager not started");
 
     ++memoizedMaxSequenceNumber;
@@ -653,13 +825,15 @@ final class SQLiteIndexManager implements IndexManager {
               FieldIndex.IndexState.create(memoizedMaxSequenceNumber, offset));
       db.execute(
           "REPLACE INTO index_state (index_id, uid,  sequence_number, "
-              + "read_time_seconds, read_time_nanos, document_key) VALUES(?, ?, ?, ?, ?, ?)",
+              + "read_time_seconds, read_time_nanos, document_key, largest_batch_id) "
+              + "VALUES(?, ?, ?, ?, ?, ?, ?)",
           fieldIndex.getIndexId(),
           uid,
           memoizedMaxSequenceNumber,
           offset.getReadTime().getTimestamp().getSeconds(),
           offset.getReadTime().getTimestamp().getNanoseconds(),
-          EncodedPath.encode(offset.getDocumentKey().getPath()));
+          EncodedPath.encode(offset.getDocumentKey().getPath()),
+          offset.getLargestBatchId());
       memoizeIndex(updatedIndex);
     }
   }

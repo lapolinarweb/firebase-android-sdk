@@ -19,6 +19,7 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
+import android.os.Build;
 import android.util.Base64;
 import androidx.annotation.VisibleForTesting;
 import com.google.android.datatransport.runtime.TransportContext;
@@ -74,7 +75,12 @@ public class AlarmManagerScheduler implements WorkScheduler {
 
   @VisibleForTesting
   boolean isJobServiceOn(Intent intent) {
-    return (PendingIntent.getBroadcast(context, 0, intent, PendingIntent.FLAG_NO_CREATE) != null);
+    int flags =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+            ? PendingIntent.FLAG_NO_CREATE | PendingIntent.FLAG_IMMUTABLE
+            : PendingIntent.FLAG_NO_CREATE;
+
+    return (PendingIntent.getBroadcast(context, 0, intent, flags) != null);
   }
 
   @Override
@@ -109,9 +115,11 @@ public class AlarmManagerScheduler implements WorkScheduler {
     }
 
     long backendTime = eventStore.getNextCallTime(transportContext);
+    boolean hasPendingEvents = force && eventStore.hasPendingEventsFor(transportContext);
 
     long scheduleDelay =
-        config.getScheduleDelay(transportContext.getPriority(), backendTime, attemptNumber);
+        config.getScheduleDelay(
+            transportContext.getPriority(), backendTime, attemptNumber, hasPendingEvents);
 
     Logging.d(
         LOG_TAG,
@@ -121,7 +129,12 @@ public class AlarmManagerScheduler implements WorkScheduler {
         backendTime,
         attemptNumber);
 
-    PendingIntent pendingIntent = PendingIntent.getBroadcast(context, 0, intent, 0);
+    PendingIntent pendingIntent =
+        PendingIntent.getBroadcast(
+            context,
+            0,
+            intent,
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0);
     this.alarmManager.set(
         AlarmManager.ELAPSED_REALTIME, clock.getTime() + scheduleDelay, pendingIntent);
   }

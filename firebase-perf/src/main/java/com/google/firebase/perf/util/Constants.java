@@ -22,8 +22,8 @@ public class Constants {
   public static final String PREFS_NAME = "FirebasePerfSharedPrefs";
   public static final String ENABLE_DISABLE = "isEnabled";
 
-  public static final float MIN_SAMPLING_RATE = 0.00f;
-  public static final float MAX_SAMPLING_RATE = 1.00f;
+  public static final double MIN_SAMPLING_RATE = 0.0;
+  public static final double MAX_SAMPLING_RATE = 1.0;
 
   // Max length of URL.
   public static final int MAX_URL_LENGTH = 2000;
@@ -51,6 +51,15 @@ public class Constants {
 
   /** Screen trace name is the prefix plus activity class name. */
   public static final String SCREEN_TRACE_PREFIX = "_st_";
+
+  /** Attribute key for the parent fragment of a fragment screen trace. */
+  public static final String PARENT_FRAGMENT_ATTRIBUTE_KEY = "Parent_fragment";
+
+  /** Attribute key for the hosting activity of a fragment screen trace. */
+  public static final String ACTIVITY_ATTRIBUTE_KEY = "Hosting_activity";
+
+  /** Attribute value for when the current fragment does not have a parent fragment. */
+  public static final String PARENT_FRAGMENT_ATTRIBUTE_VALUE_NONE = "No parent";
 
   /** frames longer than 16 ms are slow frames */
   public static final int SLOW_FRAME_TIME = 16;

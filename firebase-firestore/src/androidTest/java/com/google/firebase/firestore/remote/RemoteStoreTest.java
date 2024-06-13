@@ -21,11 +21,10 @@ import androidx.test.ext.junit.runners.AndroidJUnit4;
 import com.google.firebase.database.collection.ImmutableSortedSet;
 import com.google.firebase.firestore.auth.User;
 import com.google.firebase.firestore.core.OnlineState;
-import com.google.firebase.firestore.local.DefaultQueryEngine;
-import com.google.firebase.firestore.local.IndexBackfiller;
 import com.google.firebase.firestore.local.LocalStore;
 import com.google.firebase.firestore.local.MemoryPersistence;
 import com.google.firebase.firestore.local.Persistence;
+import com.google.firebase.firestore.local.QueryEngine;
 import com.google.firebase.firestore.model.DocumentKey;
 import com.google.firebase.firestore.model.mutation.MutationBatchResult;
 import com.google.firebase.firestore.testutil.IntegrationTestUtil;
@@ -76,12 +75,10 @@ public class RemoteStoreTest {
         };
 
     FakeConnectivityMonitor connectivityMonitor = new FakeConnectivityMonitor();
-    DefaultQueryEngine queryEngine = new DefaultQueryEngine();
+    QueryEngine queryEngine = new QueryEngine();
     Persistence persistence = MemoryPersistence.createEagerGcMemoryPersistence();
     persistence.start();
-    IndexBackfiller indexBackfiller = new IndexBackfiller(persistence, new AsyncQueue());
-    LocalStore localStore =
-        new LocalStore(persistence, indexBackfiller, queryEngine, User.UNAUTHENTICATED);
+    LocalStore localStore = new LocalStore(persistence, queryEngine, User.UNAUTHENTICATED);
     RemoteStore remoteStore =
         new RemoteStore(callback, localStore, datastore, testQueue, connectivityMonitor);
 

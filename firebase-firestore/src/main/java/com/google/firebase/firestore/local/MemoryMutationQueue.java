@@ -152,7 +152,7 @@ final class MemoryMutationQueue implements MutationQueue {
       batchesByDocumentKey =
           batchesByDocumentKey.insert(new DocumentReference(mutation.getKey(), batchId));
 
-      indexManager.addToCollectionParentIndex(mutation.getKey().getPath().popLast());
+      indexManager.addToCollectionParentIndex(mutation.getKey().getCollectionPath());
     }
 
     return batch;
@@ -363,7 +363,7 @@ final class MemoryMutationQueue implements MutationQueue {
    * is within the bounds of the queue.
    *
    * @param batchId The batchId to search for
-   * @param action A description of what the caller is doing, phrased in passive form (e.g.
+   * @param action A description of what the caller is doing, phrased in passive form (for example
    *     "acknowledged" in a routine that acknowledges batches).
    */
   private int indexOfExistingBatchId(int batchId, String action) {

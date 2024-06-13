@@ -87,6 +87,7 @@ public abstract class Mutation {
    * of the document, and a {@link FieldMask} representing the fields that are mutated by the local
    * mutations.
    */
+  @Nullable
   public static Mutation calculateOverlayMutation(MutableDocument doc, @Nullable FieldMask mask) {
     if ((!doc.hasLocalMutations()) || (mask != null && mask.getMask().isEmpty())) {
       return null;
@@ -140,8 +141,8 @@ public abstract class Mutation {
 
   /**
    * Applies this mutation to the given Document for the purposes of computing a new remote document
-   * If the input document doesn't match the expected state (e.g. it is invalid or outdated), the
-   * document state may transition to unknown.
+   * If the input document doesn't match the expected state (for example, the document is invalid or
+   * outdated), the document state may transition to unknown.
    *
    * @param document The document to mutate.
    * @param mutationResult The result of applying the mutation from the backend.
@@ -162,6 +163,12 @@ public abstract class Mutation {
    */
   public abstract @Nullable FieldMask applyToLocalView(
       MutableDocument document, @Nullable FieldMask previousMask, Timestamp localWriteTime);
+
+  /**
+   * Returns a {@code FieldMask} representing the fields that will be changed by applying this
+   * mutation. Returns {@code null} if the mutation will overwrite the entire document.
+   */
+  public abstract @Nullable FieldMask getFieldMask();
 
   /** Helper for derived classes to implement .equals(). */
   boolean hasSameKeyAndPrecondition(Mutation other) {

@@ -21,14 +21,22 @@ import android.net.Uri;
 import android.os.Bundle;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.annotation.VisibleForTesting;
+
 import com.google.android.gms.common.GooglePlayServicesUtil;
 import com.google.android.gms.common.annotation.KeepForSdk;
 import com.google.android.gms.common.util.DefaultClock;
-import com.google.android.gms.common.util.VisibleForTesting;
 import com.google.firebase.dynamiclinks.internal.DynamicLinkData;
 import com.google.firebase.dynamiclinks.internal.DynamicLinkUTMParams;
 
-/** Provides accessor methods to dynamic links data. */
+/**
+ * Provides accessor methods to dynamic links data.
+ *
+ * @deprecated Firebase Dynamic Links is deprecated and should not be used in new projects. The
+ *   service will shut down on August 25, 2025. For more information, see
+ *   <a href="https://firebase.google.com/support/dynamic-links-faq">Dynamic Links deprecation documentation</a>.
+ */
+@Deprecated
 public class PendingDynamicLinkData {
 
   @Nullable private final DynamicLinkUTMParams dynamicLinkUTMParams;
@@ -71,12 +79,12 @@ public class PendingDynamicLinkData {
   }
 
   /**
-   * Return the {@link Bundle} so that 1P dynamic links extensions can access extension data. The
+   * Returns the {@link Bundle} so that 1P dynamic links extensions can access extension data. The
    * data is stored bundle with keys defined by the extension. The bundle is shared with all
    * extensions, so the keys should be unique using the package name of the extension to define the
    * namespace.
    *
-   * @return A bundle will all extension data.
+   * @return A bundle with all extensions data.
    * @hide
    */
   @KeepForSdk
@@ -89,14 +97,18 @@ public class PendingDynamicLinkData {
   }
 
   /**
-   * Return the link parameter of the dynamic link.
+   * Returns the link parameter of the Firebase Dynamic Link.
    *
    * <p>This link will be set as data in the launch Intent, see {@link Intent#setData(Uri)}, which
    * will match {@link android.content.IntentFilter} to deep link into the app.
    *
    * @return The deep link if it exists, null otherwise.
+   * @deprecated Firebase Dynamic Links is deprecated and should not be used in new projects. The
+   *   service will shut down on August 25, 2025. For more information, see
+   *   <a href="https://firebase.google.com/support/dynamic-links-faq">Dynamic Links deprecation documentation</a>.
    */
   @Nullable
+  @Deprecated
   public Uri getLink() {
     if (dynamicLinkData == null) {
       return null;
@@ -109,12 +121,16 @@ public class PendingDynamicLinkData {
   }
 
   /**
-   * Return the {@link Bundle} which contains utm parameters associated with the firebase dynamic
-   * link.
+   * Returns the {@link Bundle} which contains utm parameters associated with the Firebase Dynamic
+   * Link.
    *
    * @return Bundle of utm parameters associated with firebase dynamic link.
+   * @deprecated Firebase Dynamic Links is deprecated and should not be used in new projects. The
+   *   service will shut down on August 25, 2025. For more information, see
+   *   <a href="https://firebase.google.com/support/dynamic-links-faq">Dynamic Links deprecation documentation</a>.
    */
   @NonNull
+  @Deprecated
   public Bundle getUtmParameters() {
     if (dynamicLinkUTMParams == null) {
       return new Bundle();
@@ -124,13 +140,17 @@ public class PendingDynamicLinkData {
   }
 
   /**
-   * The minimum app version requested to process the dynamic link that can be compared directly
-   * with {@link android.content.pm.PackageInfo#versionCode}. If the minimum version code is higher
-   * than the installed app version code, the app can upgrade using {@link
+   * Gets the minimum app version requested to process the Firebase Dynamic Link that can be
+   * compared directly with {@link android.content.pm.PackageInfo#versionCode}. If the minimum
+   * version code is higher than the installed app version code, the app can upgrade using {@link
    * #getUpdateAppIntent(Context)}.
    *
    * @return minimum version code set on the dynamic link, or 0 if not specified.
+   * @deprecated Firebase Dynamic Links is deprecated and should not be used in new projects. The
+   *   service will shut down on August 25, 2025. For more information, see
+   *   <a href="https://firebase.google.com/support/dynamic-links-faq">Dynamic Links deprecation documentation</a>.
    */
+  @Deprecated
   public int getMinimumAppVersion() {
     if (dynamicLinkData == null) {
       return 0;
@@ -139,11 +159,15 @@ public class PendingDynamicLinkData {
   }
 
   /**
-   * The time that the user clicked on the dynamic link. This can be used to determine the amount of
-   * time that has passed since the user selected the link until the app is launched.
+   * Gets the time that the user clicked on the Firebase Dynamic Link. This can be used to determine
+   * the amount of time that has passed since the user selected the link until the app is launched.
    *
    * @return The number of milliseconds that have elapsed since January 1, 1970.
+   * @deprecated Firebase Dynamic Links is deprecated and should not be used in new projects. The
+   *   service will shut down on August 25, 2025. For more information, see
+   *   <a href="https://firebase.google.com/support/dynamic-links-faq">Dynamic Links deprecation documentation</a>.
    */
+  @Deprecated
   public long getClickTimestamp() {
     if (dynamicLinkData == null) {
       return 0L;
@@ -152,7 +176,7 @@ public class PendingDynamicLinkData {
   }
 
   /**
-   * Provides the redirect url, which is used as the alternative to opening the app. This url may
+   * Gets the redirect url, which is used as the alternative to opening the app. This url may
    * install the app or go to an app specific website.
    *
    * @return Url that can be used to create an intent to launch an activity.
@@ -168,7 +192,7 @@ public class PendingDynamicLinkData {
   }
 
   /**
-   * Provide an intent to update the app to the version in the Play Store.
+   * Gets the intent to update the app to the version in the Play Store.
    *
    * <p>An intent is returned to be used as a parameter to {@link
    * android.app.Activity#startActivity(Intent)} to launch the Play Store update flow for the app.
@@ -184,8 +208,12 @@ public class PendingDynamicLinkData {
    *
    * @return - An {@link Intent} that will launch the Play Store to update the app, or null if the
    *     dynamic link minimum version code is not greater than the installed version.
+   * @deprecated Firebase Dynamic Links is deprecated and should not be used in new projects. The
+   *   service will shut down on August 25, 2025. For more information, see
+   *   <a href="https://firebase.google.com/support/dynamic-links-faq">Dynamic Links deprecation documentation</a>.
    */
   @Nullable
+  @Deprecated
   public Intent getUpdateAppIntent(@NonNull Context context) {
     int versionCode;
     // zero indicates any version is accepted.

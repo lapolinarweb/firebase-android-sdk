@@ -16,8 +16,10 @@ package com.google.firebase.inappmessaging;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import com.google.android.gms.common.util.VisibleForTesting;
+import androidx.annotation.VisibleForTesting;
+
 import com.google.firebase.FirebaseApp;
+import com.google.firebase.annotations.concurrent.Lightweight;
 import com.google.firebase.inappmessaging.internal.DataCollectionHelper;
 import com.google.firebase.inappmessaging.internal.DeveloperListenerManager;
 import com.google.firebase.inappmessaging.internal.DisplayCallbacksFactory;
@@ -60,6 +62,7 @@ public class FirebaseInAppMessaging {
 
   private boolean areMessagesSuppressed;
   private FirebaseInAppMessagingDisplay fiamDisplay;
+  @Lightweight private Executor lightWeightExecutor;
 
   @VisibleForTesting
   @Inject
@@ -69,7 +72,8 @@ public class FirebaseInAppMessaging {
       DataCollectionHelper dataCollectionHelper,
       FirebaseInstallationsApi firebaseInstallations,
       DisplayCallbacksFactory displayCallbacksFactory,
-      DeveloperListenerManager developerListenerManager) {
+      DeveloperListenerManager developerListenerManager,
+      @Lightweight Executor lightWeightExecutor) {
     this.inAppMessageStreamManager = inAppMessageStreamManager;
     this.programaticContextualTriggers = programaticContextualTriggers;
     this.dataCollectionHelper = dataCollectionHelper;
@@ -77,11 +81,15 @@ public class FirebaseInAppMessaging {
     this.areMessagesSuppressed = false;
     this.displayCallbacksFactory = displayCallbacksFactory;
     this.developerListenerManager = developerListenerManager;
+    this.lightWeightExecutor = lightWeightExecutor;
 
     firebaseInstallations
         .getId()
         .addOnSuccessListener(
-            id -> Logging.logi("Starting InAppMessaging runtime with Installation ID " + id));
+            lightWeightExecutor,
+            id -> {
+              Logging.logi("Starting InAppMessaging runtime with Installation ID " + id);
+            });
 
     Disposable unused =
         inAppMessageStreamManager
@@ -90,11 +98,8 @@ public class FirebaseInAppMessaging {
   }
 
   /**
-   * Get FirebaseInAppMessaging instance using the firebase app returned by {@link
+   * Gets FirebaseInAppMessaging instance using the firebase app returned by {@link
    * FirebaseApp#getInstance()}
-   *
-   * @param
-   * @return
    */
   @NonNull
   public static FirebaseInAppMessaging getInstance() {
@@ -102,7 +107,7 @@ public class FirebaseInAppMessaging {
   }
 
   /**
-   * Determine whether automatic data collection is enabled or not
+   * Determines whether automatic data collection is enabled or not.
    *
    * @return true if auto initialization is required
    */
@@ -111,7 +116,7 @@ public class FirebaseInAppMessaging {
   }
 
   /**
-   * Enable, disable or clear automatic data collection for Firebase In-App Messaging.
+   * Enables, disables, or clears automatic data collection for Firebase In-App Messaging.
    *
    * <p>When enabled, generates a registration token on app startup if there is no valid one and
    * generates a new token when it is deleted (which prevents {@link
@@ -146,7 +151,7 @@ public class FirebaseInAppMessaging {
   }
 
   /**
-   * Enable or disable automatic data collection for Firebase In-App Messaging.
+   * Enables, disables, or clears automatic data collection for Firebase In-App Messaging.
    *
    * <p>When enabled, generates a registration token on app startup if there is no valid one and
    * generates a new token when it is deleted (which prevents {@link
@@ -172,7 +177,7 @@ public class FirebaseInAppMessaging {
   }
 
   /**
-   * Enable or disable suppression of Firebase In App Messaging messages
+   * Enables or disables suppression of Firebase In App Messaging messages.
    *
    * <p>When enabled, no in app messages will be rendered until either you either disable
    * suppression, or the app restarts, as this state is not preserved over app restarts.
@@ -186,7 +191,7 @@ public class FirebaseInAppMessaging {
   }
 
   /**
-   * Determine whether messages are suppressed or not. This is honored by the UI sdk, which handles
+   * Determines whether messages are suppressed or not. This is honored by the UI sdk, which handles
    * rendering the in app message.
    *
    * @return true if messages should be suppressed
@@ -196,8 +201,8 @@ public class FirebaseInAppMessaging {
   }
 
   /**
-   * Called to set a new message display component for FIAM SDK. This is the method used by both the
-   * default FIAM display SDK or any app wanting to customize the message display.
+   * Sets message display component for FIAM SDK. This is the method used by both the default FIAM
+   * display SDK or any app wanting to customize the message display.
    */
   public void setMessageDisplayComponent(@NonNull FirebaseInAppMessagingDisplay messageDisplay) {
     Logging.logi("Setting display event component");
@@ -214,12 +219,8 @@ public class FirebaseInAppMessaging {
     this.fiamDisplay = null;
   }
 
-  /*
-   * Adds/Removes the event listeners. These listeners are triggered after FIAM's internal metrics reporting, but regardless of success/failure of the FIAM-internal callbacks.
-   */
-
   /**
-   * Registers an impression listener with FIAM, which will be notified on every FIAM impression
+   * Registers an impression listener with FIAM, which will be notified on every FIAM impression.
    *
    * @param impressionListener
    */
@@ -229,7 +230,7 @@ public class FirebaseInAppMessaging {
   }
 
   /**
-   * Registers a click listener with FIAM, which will be notified on every FIAM click
+   * Registers a click listener with FIAM, which will be notified on every FIAM click.
    *
    * @param clickListener
    */
@@ -238,7 +239,7 @@ public class FirebaseInAppMessaging {
   }
 
   /**
-   * Registers a dismiss listener with FIAM, which will be notified on every FIAM dismiss
+   * Registers a dismiss listener with FIAM, which will be notified on every FIAM dismiss.
    *
    * @param dismissListener
    */
@@ -248,7 +249,7 @@ public class FirebaseInAppMessaging {
 
   /**
    * Registers a display error listener with FIAM, which will be notified on every FIAM display
-   * error
+   * error.
    *
    * @param displayErrorListener
    */
@@ -257,11 +258,9 @@ public class FirebaseInAppMessaging {
     developerListenerManager.addDisplayErrorListener(displayErrorListener);
   }
 
-  // Executed with provided executor
-
   /**
    * Registers an impression listener with FIAM, which will be notified on every FIAM impression,
-   * and triggered on the provided executor
+   * and triggered on the provided executor.
    *
    * @param impressionListener
    * @param executor
@@ -274,7 +273,7 @@ public class FirebaseInAppMessaging {
 
   /**
    * Registers a click listener with FIAM, which will be notified on every FIAM click, and triggered
-   * on the provided executor
+   * on the provided executor.
    *
    * @param clickListener
    * @param executor
@@ -286,7 +285,7 @@ public class FirebaseInAppMessaging {
 
   /**
    * Registers a dismiss listener with FIAM, which will be notified on every FIAM dismiss, and
-   * triggered on the provided executor
+   * triggered on the provided executor.
    *
    * @param dismissListener
    * @param executor
@@ -298,7 +297,7 @@ public class FirebaseInAppMessaging {
 
   /**
    * Registers a display error listener with FIAM, which will be notified on every FIAM display
-   * error, and triggered on the provided executor
+   * error, and triggered on the provided executor.
    *
    * @param displayErrorListener
    * @param executor
@@ -309,10 +308,8 @@ public class FirebaseInAppMessaging {
     developerListenerManager.addDisplayErrorListener(displayErrorListener, executor);
   }
 
-  // Removing individual listeners:
-
   /**
-   * Unregisters an impression listener
+   * Unregisters an impression listener.
    *
    * @param impressionListener
    */
@@ -322,7 +319,7 @@ public class FirebaseInAppMessaging {
   }
 
   /**
-   * Unregisters a click listener
+   * Unregisters a click listener.
    *
    * @param clickListener
    */
@@ -331,13 +328,24 @@ public class FirebaseInAppMessaging {
   }
 
   /**
-   * Unregisters a display error listener
+   * Unregisters a display error listener.
    *
    * @param displayErrorListener
    */
   public void removeDisplayErrorListener(
       @NonNull FirebaseInAppMessagingDisplayErrorListener displayErrorListener) {
     developerListenerManager.removeDisplayErrorListener(displayErrorListener);
+  }
+
+  /**
+   * Unregisters a dismiss listener.
+   *
+   * @param dismissListener the listener callback to be removed which was added using {@link
+   *     #addDismissListener}
+   */
+  public void removeDismissListener(
+      @NonNull FirebaseInAppMessagingDismissListener dismissListener) {
+    developerListenerManager.removeDismissListener(dismissListener);
   }
 
   /**
@@ -350,8 +358,8 @@ public class FirebaseInAppMessaging {
   }
 
   /**
-   * Programmatically trigger a contextual trigger. This will display any eligible in-app messages
-   * that are triggered by this event
+   * Programmatically triggers a contextual trigger. This will display any eligible in-app messages
+   * that are triggered by this event.
    *
    * @param eventName
    */

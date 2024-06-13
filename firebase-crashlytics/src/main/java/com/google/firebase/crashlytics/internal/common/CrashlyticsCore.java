@@ -22,16 +22,19 @@ import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
 import com.google.android.gms.tasks.Task;
 import com.google.android.gms.tasks.Tasks;
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.google.firebase.FirebaseApp;
 import com.google.firebase.crashlytics.BuildConfig;
 import com.google.firebase.crashlytics.internal.CrashlyticsNativeComponent;
 import com.google.firebase.crashlytics.internal.Logger;
+import com.google.firebase.crashlytics.internal.RemoteConfigDeferredProxy;
 import com.google.firebase.crashlytics.internal.analytics.AnalyticsEventLogger;
 import com.google.firebase.crashlytics.internal.breadcrumbs.BreadcrumbSource;
-import com.google.firebase.crashlytics.internal.log.LogFileManager;
+import com.google.firebase.crashlytics.internal.metadata.LogFileManager;
+import com.google.firebase.crashlytics.internal.metadata.UserMetadata;
 import com.google.firebase.crashlytics.internal.persistence.FileStore;
-import com.google.firebase.crashlytics.internal.settings.SettingsDataProvider;
-import com.google.firebase.crashlytics.internal.settings.model.Settings;
+import com.google.firebase.crashlytics.internal.settings.Settings;
+import com.google.firebase.crashlytics.internal.settings.SettingsProvider;
 import com.google.firebase.crashlytics.internal.stacktrace.MiddleOutFallbackStrategy;
 import com.google.firebase.crashlytics.internal.stacktrace.RemoveRepeatsStrategy;
 import com.google.firebase.crashlytics.internal.stacktrace.StackTraceTrimmingStrategy;
@@ -46,10 +49,10 @@ import java.util.concurrent.TimeoutException;
 @SuppressWarnings("PMD.NullAssignment")
 public class CrashlyticsCore {
   private static final String MISSING_BUILD_ID_MSG =
-      "The Crashlytics build ID is missing. This "
-          + "occurs when Crashlytics tooling is absent from your app's build configuration. "
-          + "Please review Crashlytics onboarding instructions and ensure you have a valid "
-          + "Crashlytics account.";
+      "The Crashlytics build ID is missing. This occurs when the Crashlytics Gradle plugin is "
+          + "missing from your app's build configuration. Please review the Firebase Crashlytics "
+          + "onboarding instructions at "
+          + "https://firebase.google.com/docs/crashlytics/get-started?platform=android#add-plugin";
 
   static final int MAX_STACK_SIZE = 1024;
   static final int NUM_STACK_REPETITIONS_ALLOWED = 10;
@@ -58,7 +61,12 @@ public class CrashlyticsCore {
   static final String CRASHLYTICS_REQUIRE_BUILD_ID = "com.crashlytics.RequireBuildId";
   static final boolean CRASHLYTICS_REQUIRE_BUILD_ID_DEFAULT = true;
 
-  static final int DEFAULT_MAIN_HANDLER_TIMEOUT_SEC = 4;
+  static final int DEFAULT_MAIN_HANDLER_TIMEOUT_SEC = 3;
+
+  private static final String ON_DEMAND_RECORDED_KEY =
+      "com.crashlytics.on-demand.recorded-exceptions";
+  private static final String ON_DEMAND_DROPPED_KEY =
+      "com.crashlytics.on-demand.dropped-exceptions";
 
   // If this marker sticks around, the app is crashing before we finished initializing
   private static final String INITIALIZATION_MARKER_FILE_NAME = "initialization_marker";
@@ -67,6 +75,7 @@ public class CrashlyticsCore {
   private final Context context;
   private final FirebaseApp app;
   private final DataCollectionArbiter dataCollectionArbiter;
+  private final OnDemandCounter onDemandCounter;
 
   private final long startTime;
 
@@ -83,8 +92,11 @@ public class CrashlyticsCore {
 
   private final ExecutorService crashHandlerExecutor;
   private final CrashlyticsBackgroundWorker backgroundWorker;
+  private final CrashlyticsAppQualitySessionsSubscriber sessionsSubscriber;
 
   private final CrashlyticsNativeComponent nativeComponent;
+
+  private final RemoteConfigDeferredProxy remoteConfigDeferredProxy;
 
   // region Constructors
 
@@ -96,7 +108,9 @@ public class CrashlyticsCore {
       BreadcrumbSource breadcrumbSource,
       AnalyticsEventLogger analyticsEventLogger,
       FileStore fileStore,
-      ExecutorService crashHandlerExecutor) {
+      ExecutorService crashHandlerExecutor,
+      CrashlyticsAppQualitySessionsSubscriber sessionsSubscriber,
+      RemoteConfigDeferredProxy remoteConfigDeferredProxy) {
     this.app = app;
     this.dataCollectionArbiter = dataCollectionArbiter;
     this.context = app.getApplicationContext();
@@ -107,15 +121,18 @@ public class CrashlyticsCore {
     this.crashHandlerExecutor = crashHandlerExecutor;
     this.fileStore = fileStore;
     this.backgroundWorker = new CrashlyticsBackgroundWorker(crashHandlerExecutor);
+    this.sessionsSubscriber = sessionsSubscriber;
+    this.remoteConfigDeferredProxy = remoteConfigDeferredProxy;
 
     startTime = System.currentTimeMillis();
+    onDemandCounter = new OnDemandCounter();
   }
 
   // endregion
 
   // region Initialization
 
-  public boolean onPreExecute(AppData appData, SettingsDataProvider settingsProvider) {
+  public boolean onPreExecute(AppData appData, SettingsProvider settingsProvider) {
     // before starting the crash detector make sure that this was built with our build
     // tools.
     // Throw an exception and halt the app if the build ID is required and not present.
@@ -128,15 +145,19 @@ public class CrashlyticsCore {
       throw new IllegalStateException(MISSING_BUILD_ID_MSG);
     }
 
+    final String sessionIdentifier = new CLSUUID(idManager).toString();
     try {
       crashMarker = new CrashlyticsFileMarker(CRASH_MARKER_FILE_NAME, fileStore);
       initializationMarker = new CrashlyticsFileMarker(INITIALIZATION_MARKER_FILE_NAME, fileStore);
 
-      final UserMetadata userMetadata = new UserMetadata();
+      final UserMetadata userMetadata =
+          new UserMetadata(sessionIdentifier, fileStore, backgroundWorker);
       final LogFileManager logFileManager = new LogFileManager(fileStore);
       final StackTraceTrimmingStrategy stackTraceTrimmingStrategy =
           new MiddleOutFallbackStrategy(
               MAX_STACK_SIZE, new RemoveRepeatsStrategy(NUM_STACK_REPETITIONS_ALLOWED));
+
+      remoteConfigDeferredProxy.setupListener(userMetadata);
 
       final SessionReportingCoordinator sessionReportingCoordinator =
           SessionReportingCoordinator.create(
@@ -147,7 +168,9 @@ public class CrashlyticsCore {
               logFileManager,
               userMetadata,
               stackTraceTrimmingStrategy,
-              settingsProvider);
+              settingsProvider,
+              onDemandCounter,
+              sessionsSubscriber);
 
       controller =
           new CrashlyticsController(
@@ -162,7 +185,8 @@ public class CrashlyticsCore {
               logFileManager,
               sessionReportingCoordinator,
               nativeComponent,
-              analyticsEventLogger);
+              analyticsEventLogger,
+              sessionsSubscriber);
 
       // If the file is present at this point, then the previous run's initialization
       // did not complete, and we want to perform initialization synchronously this time.
@@ -173,7 +197,7 @@ public class CrashlyticsCore {
       checkForPreviousCrash();
 
       controller.enableExceptionHandling(
-          Thread.getDefaultUncaughtExceptionHandler(), settingsProvider);
+          sessionIdentifier, Thread.getDefaultUncaughtExceptionHandler(), settingsProvider);
 
       if (initializeSynchronously && CommonUtils.canTryConnection(context)) {
         Logger.getLogger()
@@ -197,7 +221,8 @@ public class CrashlyticsCore {
   }
 
   /** Performs background initialization asynchronously on the background worker's thread. */
-  public Task<Void> doBackgroundInitializationAsync(SettingsDataProvider settingsProvider) {
+  @CanIgnoreReturnValue
+  public Task<Void> doBackgroundInitializationAsync(SettingsProvider settingsProvider) {
     return Utils.callTask(
         crashHandlerExecutor,
         new Callable<Task<Void>>() {
@@ -209,16 +234,19 @@ public class CrashlyticsCore {
   }
 
   /** Performs background initialization synchronously on the calling thread. */
-  private Task<Void> doBackgroundInitialization(SettingsDataProvider settingsProvider) {
+  @CanIgnoreReturnValue
+  private Task<Void> doBackgroundInitialization(SettingsProvider settingsProvider) {
     // create the marker for this run
     markInitializationStarted();
 
     try {
       breadcrumbSource.registerBreadcrumbHandler(this::log);
 
-      final Settings settingsData = settingsProvider.getSettings();
+      controller.saveVersionControlInfo();
 
-      if (!settingsData.getFeaturesData().collectReports) {
+      final Settings settingsData = settingsProvider.getSettingsSync();
+
+      if (!settingsData.featureFlagData.collectReports) {
         Logger.getLogger().d("Collection of crash reports disabled in Crashlytics settings.");
         // TODO: This isn't actually an error condition, so figure out the right way to
         // handle this case.
@@ -233,7 +261,7 @@ public class CrashlyticsCore {
       // TODO: Move this call out of this method, so that the return value merely indicates
       // initialization is complete. Callers that want to know when report sending is complete can
       // handle that as a separate call.
-      return controller.submitAllReports(settingsProvider.getAppSettings());
+      return controller.submitAllReports(settingsProvider.getSettingsAsync());
     } catch (Exception e) {
       Logger.getLogger()
           .e("Crashlytics encountered a problem during asynchronous initialization.", e);
@@ -345,6 +373,10 @@ public class CrashlyticsCore {
     controller.setCustomKeys(keysAndValues);
   }
 
+  // endregion
+
+  // region Internal API
+
   /**
    * Set a value to be associated with a given key for your crash data. The key/value pairs will be
    * reported with any crash that occurs in this session. A maximum of 64 key/value pairs can be
@@ -359,6 +391,19 @@ public class CrashlyticsCore {
    */
   public void setInternalKey(String key, String value) {
     controller.setInternalKey(key, value);
+  }
+
+  /** Logs a fatal Throwable on the Crashlytics servers on-demand. */
+  public void logFatalException(Throwable throwable) {
+    Logger.getLogger()
+        .d("Recorded on-demand fatal events: " + onDemandCounter.getRecordedOnDemandExceptions());
+    Logger.getLogger()
+        .d("Dropped on-demand fatal events: " + onDemandCounter.getDroppedOnDemandExceptions());
+    controller.setInternalKey(
+        ON_DEMAND_RECORDED_KEY, Integer.toString(onDemandCounter.getRecordedOnDemandExceptions()));
+    controller.setInternalKey(
+        ON_DEMAND_DROPPED_KEY, Integer.toString(onDemandCounter.getDroppedOnDemandExceptions()));
+    controller.logFatalException(Thread.currentThread(), throwable);
   }
 
   // endregion
@@ -377,13 +422,13 @@ public class CrashlyticsCore {
    * When a startup crash occurs, Crashlytics must lock on the main thread and complete
    * initializaiton to upload crash result. 4 seconds is chosen for the lock to prevent ANR
    */
-  private void finishInitSynchronously(SettingsDataProvider settingsDataProvider) {
+  private void finishInitSynchronously(SettingsProvider settingsProvider) {
 
     final Runnable runnable =
         new Runnable() {
           @Override
           public void run() {
-            doBackgroundInitialization(settingsDataProvider);
+            doBackgroundInitialization(settingsProvider);
           }
         };
 

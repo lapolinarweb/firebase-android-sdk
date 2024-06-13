@@ -20,6 +20,7 @@ import static com.google.firebase.firestore.util.Assert.hardAssert;
 import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
 import com.google.firebase.Timestamp;
+import com.google.firebase.firestore.AggregateField;
 import com.google.firebase.firestore.core.Bound;
 import com.google.firebase.firestore.core.FieldFilter;
 import com.google.firebase.firestore.core.Filter;
@@ -64,11 +65,11 @@ import com.google.firestore.v1.DocumentRemove;
 import com.google.firestore.v1.DocumentTransform;
 import com.google.firestore.v1.ListenResponse;
 import com.google.firestore.v1.ListenResponse.ResponseTypeCase;
+import com.google.firestore.v1.StructuredAggregationQuery;
 import com.google.firestore.v1.StructuredQuery;
 import com.google.firestore.v1.StructuredQuery.CollectionSelector;
 import com.google.firestore.v1.StructuredQuery.CompositeFilter;
 import com.google.firestore.v1.StructuredQuery.FieldReference;
-import com.google.firestore.v1.StructuredQuery.Filter.FilterTypeCase;
 import com.google.firestore.v1.StructuredQuery.Order;
 import com.google.firestore.v1.StructuredQuery.UnaryFilter;
 import com.google.firestore.v1.Target;
@@ -201,7 +202,7 @@ public final class RemoteSerializer {
   /** Validates that a path has a prefix that looks like a valid encoded databaseId. */
   private static boolean isValidResourceName(ResourcePath path) {
     // Resource names have at least 4 components (project ID, database ID)
-    // and commonly the (root) resource type, e.g. documents
+    // and commonly the (root) resource type (for example, documents).
     return path.length() >= 4
         && path.getSegment(0).equals("projects")
         && path.getSegment(2).equals("databases");
@@ -270,7 +271,7 @@ public final class RemoteSerializer {
       builder.setUpdate(encodeDocument(mutation.getKey(), ((SetMutation) mutation).getValue()));
     } else if (mutation instanceof PatchMutation) {
       builder.setUpdate(encodeDocument(mutation.getKey(), ((PatchMutation) mutation).getValue()));
-      builder.setUpdateMask(encodeDocumentMask(((PatchMutation) mutation).getMask()));
+      builder.setUpdateMask(encodeDocumentMask((mutation.getFieldMask())));
     } else if (mutation instanceof DeleteMutation) {
       builder.setDelete(encodeKey(mutation.getKey()));
     } else if (mutation instanceof VerifyMutation) {
@@ -472,6 +473,8 @@ public final class RemoteSerializer {
         return null;
       case EXISTENCE_FILTER_MISMATCH:
         return "existence-filter-mismatch";
+      case EXISTENCE_FILTER_MISMATCH_BLOOM:
+        return "existence-filter-mismatch-bloom";
       case LIMBO_RESOLUTION:
         return "limbo-document";
       default:
@@ -498,6 +501,12 @@ public final class RemoteSerializer {
       builder.setReadTime(encodeTimestamp(targetData.getSnapshotVersion().getTimestamp()));
     } else {
       builder.setResumeToken(targetData.getResumeToken());
+    }
+
+    if (targetData.getExpectedCount() != null
+        && (!targetData.getResumeToken().isEmpty()
+            || targetData.getSnapshotVersion().compareTo(SnapshotVersion.NONE) > 0)) {
+      builder.setExpectedCount(Int32Value.newBuilder().setValue(targetData.getExpectedCount()));
     }
 
     return builder.build();
@@ -631,74 +640,105 @@ public final class RemoteSerializer {
     return decodeQueryTarget(target.getParent(), target.getStructuredQuery());
   }
 
+  StructuredAggregationQuery encodeStructuredAggregationQuery(
+      QueryTarget encodedQueryTarget,
+      List<AggregateField> aggregateFields,
+      HashMap<String, String> aliasMap) {
+    StructuredAggregationQuery.Builder structuredAggregationQuery =
+        StructuredAggregationQuery.newBuilder();
+    structuredAggregationQuery.setStructuredQuery(encodedQueryTarget.getStructuredQuery());
+
+    List<StructuredAggregationQuery.Aggregation> aggregations = new ArrayList<>();
+
+    HashSet<String> uniqueFields = new HashSet<>();
+    int aliasID = 1;
+    for (AggregateField aggregateField : aggregateFields) {
+      // The code block below is used to deduplicate the same aggregate fields.
+      if (uniqueFields.contains(aggregateField.getAlias())) {
+        continue;
+      }
+      uniqueFields.add(aggregateField.getAlias());
+
+      String serverAlias = "aggregate_" + aliasID++;
+      aliasMap.put(serverAlias, aggregateField.getAlias());
+
+      StructuredAggregationQuery.Aggregation.Builder aggregation =
+          StructuredAggregationQuery.Aggregation.newBuilder();
+      StructuredQuery.FieldReference fieldPath =
+          StructuredQuery.FieldReference.newBuilder()
+              .setFieldPath(aggregateField.getFieldPath())
+              .build();
+
+      if (aggregateField instanceof AggregateField.CountAggregateField) {
+        aggregation.setCount(StructuredAggregationQuery.Aggregation.Count.getDefaultInstance());
+      } else if (aggregateField instanceof AggregateField.SumAggregateField) {
+        aggregation.setSum(
+            StructuredAggregationQuery.Aggregation.Sum.newBuilder().setField(fieldPath).build());
+      } else if (aggregateField instanceof AggregateField.AverageAggregateField) {
+        aggregation.setAvg(
+            StructuredAggregationQuery.Aggregation.Avg.newBuilder().setField(fieldPath).build());
+      } else {
+        throw new RuntimeException("Unsupported aggregation");
+      }
+
+      aggregation.setAlias(serverAlias);
+      aggregations.add(aggregation.build());
+    }
+    structuredAggregationQuery.addAllAggregations(aggregations);
+    return structuredAggregationQuery.build();
+  }
+
   // Filters
 
   private StructuredQuery.Filter encodeFilters(List<Filter> filters) {
-    List<StructuredQuery.Filter> protos = new ArrayList<>(filters.size());
-    for (Filter filter : filters) {
-      if (filter instanceof FieldFilter) {
-        protos.add(encodeUnaryOrFieldFilter((FieldFilter) filter));
-      }
-    }
-    if (filters.size() == 1) {
-      return protos.get(0);
-    } else {
-      CompositeFilter.Builder composite = CompositeFilter.newBuilder();
-      composite.setOp(CompositeFilter.Operator.AND);
-      composite.addAllFilters(protos);
-      return StructuredQuery.Filter.newBuilder().setCompositeFilter(composite).build();
-    }
+    // A target's filter list is implicitly a composite AND filter.
+    return encodeFilter(
+        new com.google.firebase.firestore.core.CompositeFilter(
+            filters, com.google.firebase.firestore.core.CompositeFilter.Operator.AND));
   }
 
   private List<Filter> decodeFilters(StructuredQuery.Filter proto) {
-    List<StructuredQuery.Filter> filters;
-    if (proto.getFilterTypeCase() == FilterTypeCase.COMPOSITE_FILTER) {
-      hardAssert(
-          proto.getCompositeFilter().getOp() == CompositeFilter.Operator.AND,
-          "Only AND-type composite filters are supported, got %d",
-          proto.getCompositeFilter().getOp());
-      filters = proto.getCompositeFilter().getFiltersList();
-    } else {
-      filters = Collections.singletonList(proto);
-    }
+    Filter result = decodeFilter(proto);
 
-    List<Filter> result = new ArrayList<>(filters.size());
-    for (StructuredQuery.Filter filter : filters) {
-      switch (filter.getFilterTypeCase()) {
-        case COMPOSITE_FILTER:
-          throw fail("Nested composite filters are not supported.");
-
-        case FIELD_FILTER:
-          result.add(decodeFieldFilter(filter.getFieldFilter()));
-          break;
-
-        case UNARY_FILTER:
-          result.add(decodeUnaryFilter(filter.getUnaryFilter()));
-          break;
-
-        default:
-          throw fail("Unrecognized Filter.filterType %d", filter.getFilterTypeCase());
+    // Instead of a singletonList containing AND(F1, F2, ...), we can return a list containing F1,
+    // F2, ... to stay consistent with the older SDK versions.
+    if (result instanceof com.google.firebase.firestore.core.CompositeFilter) {
+      com.google.firebase.firestore.core.CompositeFilter compositeFilter =
+          (com.google.firebase.firestore.core.CompositeFilter) result;
+      if (compositeFilter.isFlatConjunction()) {
+        return compositeFilter.getFilters();
       }
     }
 
-    return result;
+    return Collections.singletonList(result);
+  }
+
+  @VisibleForTesting
+  StructuredQuery.Filter encodeFilter(com.google.firebase.firestore.core.Filter filter) {
+    if (filter instanceof FieldFilter) {
+      return encodeUnaryOrFieldFilter((FieldFilter) filter);
+    } else if (filter instanceof com.google.firebase.firestore.core.CompositeFilter) {
+      return encodeCompositeFilter((com.google.firebase.firestore.core.CompositeFilter) filter);
+    } else {
+      throw fail("Unrecognized filter type %s", filter.toString());
+    }
   }
 
   @VisibleForTesting
   StructuredQuery.Filter encodeUnaryOrFieldFilter(FieldFilter filter) {
-    if (filter.getOperator() == Filter.Operator.EQUAL
-        || filter.getOperator() == Filter.Operator.NOT_EQUAL) {
+    if (filter.getOperator() == FieldFilter.Operator.EQUAL
+        || filter.getOperator() == FieldFilter.Operator.NOT_EQUAL) {
       UnaryFilter.Builder unaryProto = UnaryFilter.newBuilder();
       unaryProto.setField(encodeFieldPath(filter.getField()));
       if (Values.isNanValue(filter.getValue())) {
         unaryProto.setOp(
-            filter.getOperator() == Filter.Operator.EQUAL
+            filter.getOperator() == FieldFilter.Operator.EQUAL
                 ? UnaryFilter.Operator.IS_NAN
                 : UnaryFilter.Operator.IS_NOT_NAN);
         return StructuredQuery.Filter.newBuilder().setUnaryFilter(unaryProto).build();
       } else if (Values.isNullValue(filter.getValue())) {
         unaryProto.setOp(
-            filter.getOperator() == Filter.Operator.EQUAL
+            filter.getOperator() == FieldFilter.Operator.EQUAL
                 ? UnaryFilter.Operator.IS_NULL
                 : UnaryFilter.Operator.IS_NOT_NULL);
         return StructuredQuery.Filter.newBuilder().setUnaryFilter(unaryProto).build();
@@ -709,6 +749,63 @@ public final class RemoteSerializer {
     proto.setOp(encodeFieldFilterOperator(filter.getOperator()));
     proto.setValue(filter.getValue());
     return StructuredQuery.Filter.newBuilder().setFieldFilter(proto).build();
+  }
+
+  StructuredQuery.CompositeFilter.Operator encodeCompositeFilterOperator(
+      com.google.firebase.firestore.core.CompositeFilter.Operator op) {
+    switch (op) {
+      case AND:
+        return StructuredQuery.CompositeFilter.Operator.AND;
+      case OR:
+        return StructuredQuery.CompositeFilter.Operator.OR;
+      default:
+        throw fail("Unrecognized composite filter type.");
+    }
+  }
+
+  com.google.firebase.firestore.core.CompositeFilter.Operator decodeCompositeFilterOperator(
+      StructuredQuery.CompositeFilter.Operator op) {
+    switch (op) {
+      case AND:
+        return com.google.firebase.firestore.core.CompositeFilter.Operator.AND;
+      case OR:
+        return com.google.firebase.firestore.core.CompositeFilter.Operator.OR;
+      default:
+        throw fail("Only AND and OR composite filter types are supported.");
+    }
+  }
+
+  @VisibleForTesting
+  StructuredQuery.Filter encodeCompositeFilter(
+      com.google.firebase.firestore.core.CompositeFilter compositeFilter) {
+    List<StructuredQuery.Filter> protos = new ArrayList<>(compositeFilter.getFilters().size());
+    for (Filter filter : compositeFilter.getFilters()) {
+      protos.add(encodeFilter(filter));
+    }
+
+    // If there's only one filter in the composite filter, use it directly.
+    if (protos.size() == 1) {
+      return protos.get(0);
+    }
+
+    CompositeFilter.Builder composite = CompositeFilter.newBuilder();
+    composite.setOp(encodeCompositeFilterOperator(compositeFilter.getOperator()));
+    composite.addAllFilters(protos);
+    return StructuredQuery.Filter.newBuilder().setCompositeFilter(composite).build();
+  }
+
+  @VisibleForTesting
+  Filter decodeFilter(StructuredQuery.Filter proto) {
+    switch (proto.getFilterTypeCase()) {
+      case COMPOSITE_FILTER:
+        return decodeCompositeFilter(proto.getCompositeFilter());
+      case FIELD_FILTER:
+        return decodeFieldFilter(proto.getFieldFilter());
+      case UNARY_FILTER:
+        return decodeUnaryFilter(proto.getUnaryFilter());
+      default:
+        throw fail("Unrecognized Filter.filterType %d", proto.getFilterTypeCase());
+    }
   }
 
   @VisibleForTesting
@@ -722,16 +819,27 @@ public final class RemoteSerializer {
     FieldPath fieldPath = FieldPath.fromServerFormat(proto.getField().getFieldPath());
     switch (proto.getOp()) {
       case IS_NAN:
-        return FieldFilter.create(fieldPath, Filter.Operator.EQUAL, Values.NAN_VALUE);
+        return FieldFilter.create(fieldPath, FieldFilter.Operator.EQUAL, Values.NAN_VALUE);
       case IS_NULL:
-        return FieldFilter.create(fieldPath, Filter.Operator.EQUAL, Values.NULL_VALUE);
+        return FieldFilter.create(fieldPath, FieldFilter.Operator.EQUAL, Values.NULL_VALUE);
       case IS_NOT_NAN:
-        return FieldFilter.create(fieldPath, Filter.Operator.NOT_EQUAL, Values.NAN_VALUE);
+        return FieldFilter.create(fieldPath, FieldFilter.Operator.NOT_EQUAL, Values.NAN_VALUE);
       case IS_NOT_NULL:
-        return FieldFilter.create(fieldPath, Filter.Operator.NOT_EQUAL, Values.NULL_VALUE);
+        return FieldFilter.create(fieldPath, FieldFilter.Operator.NOT_EQUAL, Values.NULL_VALUE);
       default:
         throw fail("Unrecognized UnaryFilter.operator %d", proto.getOp());
     }
+  }
+
+  @VisibleForTesting
+  com.google.firebase.firestore.core.CompositeFilter decodeCompositeFilter(
+      StructuredQuery.CompositeFilter compositeFilter) {
+    List<Filter> filters = new ArrayList<>();
+    for (StructuredQuery.Filter filter : compositeFilter.getFiltersList()) {
+      filters.add(decodeFilter(filter));
+    }
+    return new com.google.firebase.firestore.core.CompositeFilter(
+        filters, decodeCompositeFilterOperator(compositeFilter.getOp()));
   }
 
   private FieldReference encodeFieldPath(FieldPath field) {
@@ -888,8 +996,8 @@ public final class RemoteSerializer {
         break;
       case FILTER:
         com.google.firestore.v1.ExistenceFilter protoFilter = protoChange.getFilter();
-        // TODO: implement existence filter parsing (see b/33076578)
-        ExistenceFilter filter = new ExistenceFilter(protoFilter.getCount());
+        ExistenceFilter filter =
+            new ExistenceFilter(protoFilter.getCount(), protoFilter.getUnchangedNames());
         int targetId = protoFilter.getTargetId();
         watchChange = new ExistenceFilterWatchChange(targetId, filter);
         break;
@@ -903,8 +1011,8 @@ public final class RemoteSerializer {
 
   public SnapshotVersion decodeVersionFromListenResponse(ListenResponse watchChange) {
     // We have only reached a consistent snapshot for the entire stream if there is a read_time set
-    // and it applies to all targets (i.e. the list of targets is empty). The backend is guaranteed
-    // to send such responses.
+    // and it applies to all targets (specifically, the list of targets is empty). The backend is
+    // guaranteed to send such responses.
     if (watchChange.getResponseTypeCase() != ResponseTypeCase.TARGET_CHANGE) {
       return SnapshotVersion.NONE;
     }

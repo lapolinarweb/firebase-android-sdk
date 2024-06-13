@@ -15,6 +15,7 @@
 package com.google.firebase.firestore.remote;
 
 import static com.google.firebase.firestore.model.Values.refValue;
+import static com.google.firebase.firestore.testutil.TestUtil.andFilters;
 import static com.google.firebase.firestore.testutil.TestUtil.bound;
 import static com.google.firebase.firestore.testutil.TestUtil.deleteMutation;
 import static com.google.firebase.firestore.testutil.TestUtil.deletedDoc;
@@ -24,6 +25,7 @@ import static com.google.firebase.firestore.testutil.TestUtil.filter;
 import static com.google.firebase.firestore.testutil.TestUtil.key;
 import static com.google.firebase.firestore.testutil.TestUtil.map;
 import static com.google.firebase.firestore.testutil.TestUtil.mergeMutation;
+import static com.google.firebase.firestore.testutil.TestUtil.orFilters;
 import static com.google.firebase.firestore.testutil.TestUtil.orderBy;
 import static com.google.firebase.firestore.testutil.TestUtil.patchMutation;
 import static com.google.firebase.firestore.testutil.TestUtil.query;
@@ -507,6 +509,11 @@ public final class RemoteSerializerTest {
     targetData = new TargetData(query.toTarget(), 2, 3, QueryPurpose.EXISTENCE_FILTER_MISMATCH);
     result = serializer.encodeListenRequestLabels(targetData);
     assertEquals(map("goog-listen-tags", "existence-filter-mismatch"), result);
+
+    targetData =
+        new TargetData(query.toTarget(), 2, 3, QueryPurpose.EXISTENCE_FILTER_MISMATCH_BLOOM);
+    result = serializer.encodeListenRequestLabels(targetData);
+    assertEquals(map("goog-listen-tags", "existence-filter-mismatch-bloom"), result);
   }
 
   @Test
@@ -678,6 +685,85 @@ public final class RemoteSerializerTest {
     assertEquals(expected, actual);
     assertEquals(
         serializer.decodeQueryTarget(serializer.encodeQueryTarget(q.toTarget())), q.toTarget());
+  }
+
+  @Test
+  public void testEncodesCompositeFiltersOnDeeperCollections() {
+    // (prop < 42) || (author == "ehsann" && tags array-contains "pending")
+    Query q =
+        Query.atPath(ResourcePath.fromString("rooms/1/messages/10/attachments"))
+            .filter(
+                orFilters(
+                    filter("prop", "<", 42),
+                    andFilters(
+                        filter("author", "==", "ehsann"),
+                        filter("tags", "array-contains", "pending"))));
+    Target actual = serializer.encodeTarget(wrapTargetData(q));
+
+    StructuredQuery.Builder structuredQueryBuilder =
+        StructuredQuery.newBuilder()
+            .addFrom(CollectionSelector.newBuilder().setCollectionId("attachments"))
+            .setWhere(
+                Filter.newBuilder()
+                    .setCompositeFilter(
+                        StructuredQuery.CompositeFilter.newBuilder()
+                            .setOp(CompositeFilter.Operator.OR)
+                            .addFilters(
+                                Filter.newBuilder()
+                                    .setFieldFilter(
+                                        StructuredQuery.FieldFilter.newBuilder()
+                                            .setField(
+                                                FieldReference.newBuilder().setFieldPath("prop"))
+                                            .setOp(Operator.LESS_THAN)
+                                            .setValue(Value.newBuilder().setIntegerValue(42))))
+                            .addFilters(
+                                Filter.newBuilder()
+                                    .setCompositeFilter(
+                                        StructuredQuery.CompositeFilter.newBuilder()
+                                            .setOp(CompositeFilter.Operator.AND)
+                                            .addFilters(
+                                                Filter.newBuilder()
+                                                    .setFieldFilter(
+                                                        StructuredQuery.FieldFilter.newBuilder()
+                                                            .setField(
+                                                                FieldReference.newBuilder()
+                                                                    .setFieldPath("author"))
+                                                            .setOp(Operator.EQUAL)
+                                                            .setValue(
+                                                                Value.newBuilder()
+                                                                    .setStringValue("ehsann"))))
+                                            .addFilters(
+                                                Filter.newBuilder()
+                                                    .setFieldFilter(
+                                                        StructuredQuery.FieldFilter.newBuilder()
+                                                            .setField(
+                                                                FieldReference.newBuilder()
+                                                                    .setFieldPath("tags"))
+                                                            .setOp(Operator.ARRAY_CONTAINS)
+                                                            .setValue(
+                                                                Value.newBuilder()
+                                                                    .setStringValue(
+                                                                        "pending"))))))))
+            .addOrderBy(
+                Order.newBuilder()
+                    .setField(FieldReference.newBuilder().setFieldPath("prop"))
+                    .setDirection(Direction.ASCENDING))
+            .addOrderBy(defaultKeyOrder());
+    QueryTarget.Builder queryBuilder =
+        QueryTarget.newBuilder()
+            .setParent("projects/p/databases/d/documents/rooms/1/messages/10")
+            .setStructuredQuery(structuredQueryBuilder);
+    Target expected =
+        Target.newBuilder()
+            .setQuery(queryBuilder)
+            .setTargetId(1)
+            .setResumeToken(ByteString.EMPTY)
+            .build();
+
+    assertEquals(expected, actual);
+    com.google.firebase.firestore.core.Target roundTripped =
+        serializer.decodeQueryTarget(serializer.encodeQueryTarget(q.toTarget()));
+    assertEquals(roundTripped, q.toTarget());
   }
 
   @Test
@@ -1065,6 +1151,96 @@ public final class RemoteSerializerTest {
             .setQuery(queryBuilder)
             .setTargetId(1)
             .setReadTime(Timestamp.newBuilder().setSeconds(4))
+            .build();
+
+    assertEquals(expected, actual);
+    assertEquals(
+        serializer.decodeQueryTarget(serializer.encodeQueryTarget(q.toTarget())), q.toTarget());
+  }
+
+  @Test
+  public void encodesExpectedCountWhenResumeTokenIsPresent() {
+    Query q = Query.atPath(ResourcePath.fromString("docs"));
+    TargetData targetData =
+        new TargetData(q.toTarget(), 1, 2, QueryPurpose.LISTEN)
+            .withResumeToken(TestUtil.resumeToken(1000), SnapshotVersion.NONE)
+            .withExpectedCount(42);
+    Target actual = serializer.encodeTarget(targetData);
+
+    StructuredQuery.Builder structuredQueryBuilder =
+        StructuredQuery.newBuilder()
+            .addFrom(CollectionSelector.newBuilder().setCollectionId("docs"))
+            .addOrderBy(defaultKeyOrder());
+
+    QueryTarget.Builder queryBuilder =
+        QueryTarget.newBuilder()
+            .setParent("projects/p/databases/d/documents")
+            .setStructuredQuery(structuredQueryBuilder);
+    Target expected =
+        Target.newBuilder()
+            .setQuery(queryBuilder)
+            .setTargetId(1)
+            .setResumeToken(TestUtil.resumeToken(1000))
+            .setExpectedCount(Int32Value.newBuilder().setValue(42))
+            .build();
+
+    assertEquals(expected, actual);
+    assertEquals(
+        serializer.decodeQueryTarget(serializer.encodeQueryTarget(q.toTarget())), q.toTarget());
+  }
+
+  @Test
+  public void encodesExpectedCountWhenReadTimeIsPresent() {
+    Query q = Query.atPath(ResourcePath.fromString("docs"));
+    TargetData targetData =
+        new TargetData(q.toTarget(), 1, 2, QueryPurpose.LISTEN)
+            .withResumeToken(ByteString.EMPTY, version(4000000))
+            .withExpectedCount(42);
+    Target actual = serializer.encodeTarget(targetData);
+
+    StructuredQuery.Builder structuredQueryBuilder =
+        StructuredQuery.newBuilder()
+            .addFrom(CollectionSelector.newBuilder().setCollectionId("docs"))
+            .addOrderBy(defaultKeyOrder());
+
+    QueryTarget.Builder queryBuilder =
+        QueryTarget.newBuilder()
+            .setParent("projects/p/databases/d/documents")
+            .setStructuredQuery(structuredQueryBuilder);
+    Target expected =
+        Target.newBuilder()
+            .setQuery(queryBuilder)
+            .setTargetId(1)
+            .setReadTime(Timestamp.newBuilder().setSeconds(4))
+            .setExpectedCount(Int32Value.newBuilder().setValue(42))
+            .build();
+
+    assertEquals(expected, actual);
+    assertEquals(
+        serializer.decodeQueryTarget(serializer.encodeQueryTarget(q.toTarget())), q.toTarget());
+  }
+
+  @Test
+  public void shouldIgnoreExpectedCountWithoutResumeTokenOrReadTime() {
+    Query q = Query.atPath(ResourcePath.fromString("docs"));
+    TargetData targetData =
+        new TargetData(q.toTarget(), 1, 2, QueryPurpose.LISTEN).withExpectedCount(42);
+    Target actual = serializer.encodeTarget(targetData);
+
+    StructuredQuery.Builder structuredQueryBuilder =
+        StructuredQuery.newBuilder()
+            .addFrom(CollectionSelector.newBuilder().setCollectionId("docs"))
+            .addOrderBy(defaultKeyOrder());
+
+    QueryTarget.Builder queryBuilder =
+        QueryTarget.newBuilder()
+            .setParent("projects/p/databases/d/documents")
+            .setStructuredQuery(structuredQueryBuilder);
+    Target expected =
+        Target.newBuilder()
+            .setQuery(queryBuilder)
+            .setTargetId(1)
+            .setResumeToken(ByteString.EMPTY)
             .build();
 
     assertEquals(expected, actual);

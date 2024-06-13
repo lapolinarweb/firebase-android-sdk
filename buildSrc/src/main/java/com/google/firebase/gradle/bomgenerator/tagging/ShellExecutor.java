@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.function.Consumer;
 import org.gradle.api.GradleException;
 
+// TODO(b/267668143): With modernization efforts
 public class ShellExecutor {
   private final Runtime runtime;
   private final File cwd;
@@ -35,13 +36,19 @@ public class ShellExecutor {
   }
 
   public void execute(String command, Consumer<List<String>> consumer) {
+    this.execute(command, consumer, consumer);
+  }
+
+  public void execute(String command, Consumer<List<String>> err, Consumer<List<String>> out) {
     try {
       logger.accept("[shell] Executing: \"" + command + "\" at: " + cwd.getAbsolutePath());
       Process p = runtime.exec(command, null, cwd);
       int code = p.waitFor();
       logger.accept("[shell] Command: \"" + command + "\" returned with code: " + code);
-      BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()));
-      consumer.accept(CharStreams.readLines(reader));
+      BufferedReader stdout = new BufferedReader(new InputStreamReader(p.getInputStream()));
+      BufferedReader stderr = new BufferedReader(new InputStreamReader(p.getErrorStream()));
+      out.accept(CharStreams.readLines(stdout));
+      err.accept(CharStreams.readLines(stderr));
     } catch (IOException e) {
       throw new GradleException("Failed when executing command: " + command, e);
     } catch (InterruptedException e) {

@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.firebase.crashlytics.internal.common;
 
+import android.annotation.SuppressLint;
 import android.app.ActivityManager;
 import android.app.ApplicationExitInfo;
 import android.content.Context;
@@ -21,6 +22,7 @@ import android.os.Build.VERSION;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.StatFs;
+import android.util.Base64;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import com.google.android.gms.tasks.SuccessContinuation;
@@ -31,14 +33,18 @@ import com.google.firebase.crashlytics.internal.CrashlyticsNativeComponent;
 import com.google.firebase.crashlytics.internal.Logger;
 import com.google.firebase.crashlytics.internal.NativeSessionFileProvider;
 import com.google.firebase.crashlytics.internal.analytics.AnalyticsEventLogger;
-import com.google.firebase.crashlytics.internal.log.LogFileManager;
+import com.google.firebase.crashlytics.internal.metadata.LogFileManager;
+import com.google.firebase.crashlytics.internal.metadata.UserMetadata;
+import com.google.firebase.crashlytics.internal.model.CrashlyticsReport;
 import com.google.firebase.crashlytics.internal.model.StaticSessionData;
 import com.google.firebase.crashlytics.internal.persistence.FileStore;
-import com.google.firebase.crashlytics.internal.settings.SettingsDataProvider;
-import com.google.firebase.crashlytics.internal.settings.model.AppSettingsData;
+import com.google.firebase.crashlytics.internal.settings.Settings;
+import com.google.firebase.crashlytics.internal.settings.SettingsProvider;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FilenameFilter;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -48,6 +54,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 class CrashlyticsController {
@@ -66,6 +73,10 @@ class CrashlyticsController {
 
   private static final String GENERATOR_FORMAT = "Crashlytics Android SDK/%s";
 
+  private static final String VERSION_CONTROL_INFO_KEY = "com.crashlytics.version-control-info";
+  private static final String VERSION_CONTROL_INFO_FILE = "version-control-info.textproto";
+  private static final String META_INF_FOLDER = "META-INF/";
+
   private final Context context;
   private final DataCollectionArbiter dataCollectionArbiter;
   private final CrashlyticsFileMarker crashMarker;
@@ -81,9 +92,11 @@ class CrashlyticsController {
   private final LogFileManager logFileManager;
   private final CrashlyticsNativeComponent nativeComponent;
   private final AnalyticsEventLogger analyticsEventLogger;
+  private final CrashlyticsAppQualitySessionsSubscriber sessionsSubscriber;
   private final SessionReportingCoordinator reportingCoordinator;
 
   private CrashlyticsUncaughtExceptionHandler crashHandler;
+  private SettingsProvider settingsProvider = null;
 
   // A promise that will be resolved when unsent reports are found on the device, and
   // send/deleteUnsentReports can be called to decide how to deal with them.
@@ -113,7 +126,8 @@ class CrashlyticsController {
       LogFileManager logFileManager,
       SessionReportingCoordinator sessionReportingCoordinator,
       CrashlyticsNativeComponent nativeComponent,
-      AnalyticsEventLogger analyticsEventLogger) {
+      AnalyticsEventLogger analyticsEventLogger,
+      CrashlyticsAppQualitySessionsSubscriber sessionsSubscriber) {
     this.context = context;
     this.backgroundWorker = backgroundWorker;
     this.idManager = idManager;
@@ -125,7 +139,7 @@ class CrashlyticsController {
     this.logFileManager = logFileManager;
     this.nativeComponent = nativeComponent;
     this.analyticsEventLogger = analyticsEventLogger;
-
+    this.sessionsSubscriber = sessionsSubscriber;
     this.reportingCoordinator = sessionReportingCoordinator;
   }
 
@@ -136,16 +150,19 @@ class CrashlyticsController {
   // region Exception handling
 
   void enableExceptionHandling(
-      Thread.UncaughtExceptionHandler defaultHandler, SettingsDataProvider settingsProvider) {
+      String sessionIdentifier,
+      Thread.UncaughtExceptionHandler defaultHandler,
+      SettingsProvider settingsProvider) {
+    this.settingsProvider = settingsProvider;
     // This must be called before installing the controller with
     // Thread.setDefaultUncaughtExceptionHandler to ensure that we are ready to handle
     // any crashes we catch.
-    openSession();
+    openSession(sessionIdentifier);
     final CrashlyticsUncaughtExceptionHandler.CrashListener crashListener =
         new CrashlyticsUncaughtExceptionHandler.CrashListener() {
           @Override
           public void onUncaughtException(
-              @NonNull SettingsDataProvider settingsDataProvider,
+              @NonNull SettingsProvider settingsDataProvider,
               @NonNull Thread thread,
               @NonNull Throwable ex) {
             handleUncaughtException(settingsDataProvider, thread, ex);
@@ -157,10 +174,18 @@ class CrashlyticsController {
     Thread.setDefaultUncaughtExceptionHandler(crashHandler);
   }
 
-  synchronized void handleUncaughtException(
-      @NonNull SettingsDataProvider settingsDataProvider,
+  void handleUncaughtException(
+      @NonNull SettingsProvider settingsProvider,
       @NonNull final Thread thread,
       @NonNull final Throwable ex) {
+    handleUncaughtException(settingsProvider, thread, ex, /* isOnDemand= */ false);
+  }
+
+  synchronized void handleUncaughtException(
+      @NonNull SettingsProvider settingsProvider,
+      @NonNull final Thread thread,
+      @NonNull final Throwable ex,
+      boolean isOnDemand) {
 
     Logger.getLogger()
         .d("Handling uncaught " + "exception \"" + ex + "\" from thread " + thread.getName());
@@ -190,8 +215,8 @@ class CrashlyticsController {
                     ex, thread, currentSessionId, timestampSeconds);
 
                 doWriteAppExceptionMarker(timestampMillis);
-                doCloseSessions(settingsDataProvider);
-                doOpenSession();
+                doCloseSessions(settingsProvider);
+                doOpenSession(new CLSUUID(idManager).toString(), isOnDemand);
 
                 // If automatic data collection is disabled, we'll need to wait until the next run
                 // of the app.
@@ -201,16 +226,15 @@ class CrashlyticsController {
 
                 Executor executor = backgroundWorker.getExecutor();
 
-                return settingsDataProvider
-                    .getAppSettings()
+                return settingsProvider
+                    .getSettingsAsync()
                     .onSuccessTask(
                         executor,
-                        new SuccessContinuation<AppSettingsData, Void>() {
+                        new SuccessContinuation<Settings, Void>() {
                           @NonNull
                           @Override
-                          public Task<Void> then(@Nullable AppSettingsData appSettingsData)
-                              throws Exception {
-                            if (appSettingsData == null) {
+                          public Task<Void> then(@Nullable Settings settings) throws Exception {
+                            if (settings == null) {
                               Logger.getLogger()
                                   .w(
                                       "Received null app settings, cannot send reports at crash time.");
@@ -219,14 +243,18 @@ class CrashlyticsController {
                             // Data collection is enabled, so it's safe to send the report.
                             return Tasks.whenAll(
                                 logAnalyticsAppExceptionEvents(),
-                                reportingCoordinator.sendReports(executor));
+                                reportingCoordinator.sendReports(
+                                    executor, isOnDemand ? currentSessionId : null));
                           }
                         });
               }
             });
 
     try {
+      // TODO(mrober): Don't block the main thread ever for on-demand fatals.
       Utils.awaitEvenIfOnMainThread(handleUncaughtExceptionTask);
+    } catch (TimeoutException e) {
+      Logger.getLogger().e("Cannot send reports. Timed out while fetching settings.");
     } catch (Exception e) {
       Logger.getLogger().e("Error handling uncaught exception", e);
       // Nothing to do in this case.
@@ -255,6 +283,8 @@ class CrashlyticsController {
 
     // If data collection gets enabled while we are waiting for an action, go ahead and send the
     // reports, and any subsequent explicit response will be ignored.
+    // TODO(b/261014167): Use an explicit executor in continuations.
+    @SuppressLint("TaskMainThread")
     final Task<Boolean> collectionEnabled =
         dataCollectionArbiter
             .waitForAutomaticDataCollectionEnabled()
@@ -310,7 +340,9 @@ class CrashlyticsController {
     return unsentReportsHandled.getTask();
   }
 
-  Task<Void> submitAllReports(Task<AppSettingsData> appSettingsDataTask) {
+  // TODO(b/261014167): Use an explicit executor in continuations.
+  @SuppressLint("TaskMainThread")
+  Task<Void> submitAllReports(Task<Settings> settingsDataTask) {
     if (!reportingCoordinator.hasReportsToSend()) {
       // Just notify the user that there are no reports and stop.
       Logger.getLogger().v("No crash reports are available to be sent.");
@@ -349,12 +381,12 @@ class CrashlyticsController {
 
                         Executor executor = backgroundWorker.getExecutor();
 
-                        return appSettingsDataTask.onSuccessTask(
+                        return settingsDataTask.onSuccessTask(
                             executor,
-                            new SuccessContinuation<AppSettingsData, Void>() {
+                            new SuccessContinuation<Settings, Void>() {
                               @NonNull
                               @Override
-                              public Task<Void> then(@Nullable AppSettingsData appSettingsData)
+                              public Task<Void> then(@Nullable Settings appSettingsData)
                                   throws Exception {
                                 if (appSettingsData == null) {
                                   Logger.getLogger()
@@ -416,9 +448,16 @@ class CrashlyticsController {
         });
   }
 
+  void logFatalException(Thread thread, Throwable ex) {
+    if (settingsProvider == null) {
+      Logger.getLogger().w("settingsProvider not set");
+      return;
+    }
+    handleUncaughtException(settingsProvider, thread, ex, /* isOnDemand= */ true);
+  }
+
   void setUserId(String identifier) {
     userMetadata.setUserId(identifier);
-    cacheUserData(userMetadata);
   }
 
   void setCustomKey(String key, String value) {
@@ -429,17 +468,12 @@ class CrashlyticsController {
         throw ex;
       } else {
         Logger.getLogger().e("Attempting to set custom attribute with null key, ignoring.");
-        return;
       }
     }
-    cacheKeyData(userMetadata.getCustomKeys(), false);
   }
 
   void setCustomKeys(Map<String, String> keysAndValues) {
-    // Write all the key/value pairs before doing anything computationally expensive.
     userMetadata.setCustomKeys(keysAndValues);
-    // Once all the key/value pairs are added, update the cache.
-    cacheKeyData(userMetadata.getCustomKeys(), false);
   }
 
   void setInternalKey(String key, String value) {
@@ -450,53 +484,8 @@ class CrashlyticsController {
         throw ex;
       } else {
         Logger.getLogger().e("Attempting to set custom attribute with null key, ignoring.");
-        return;
       }
     }
-    cacheKeyData(userMetadata.getInternalKeys(), true);
-  }
-
-  /**
-   * Cache user metadata asynchronously in case of a non-graceful process exit. Can be reloaded and
-   * sent with the previous crash data on app restart. NOTE: Because this is asynchronous, it is
-   * performant in critical code paths, but susceptible to losing data if a crash happens
-   * immediately after setting a value. If this becomes a problem, we can investigate writing
-   * synchronously, or potentially add an explicit user-facing API for synchronous writes.
-   */
-  private void cacheUserData(final UserMetadata userMetaData) {
-    backgroundWorker.submit(
-        new Callable<Void>() {
-          @Override
-          public Void call() throws Exception {
-            final String currentSessionId = getCurrentSessionId();
-            if (currentSessionId == null) {
-              Logger.getLogger().d("Tried to cache user data while no session was open.");
-              return null;
-            }
-            reportingCoordinator.persistUserId(currentSessionId);
-            new MetaDataStore(fileStore).writeUserData(currentSessionId, userMetaData);
-            return null;
-          }
-        });
-  }
-
-  /**
-   * Cache custom key metadata asynchronously in case of a non-graceful process exit. Can be
-   * reloaded and sent with the previous crash data on app restart. NOTE: Because this is
-   * asynchronous, it is performant in critical code paths, but susceptible to losing data if a
-   * crash happens immediately after setting a value. If this becomes a problem, we can investigate
-   * writing synchronously, or potentially add an explicit user-facing API for synchronous writes.
-   */
-  private void cacheKeyData(final Map<String, String> keyData, boolean isInternal) {
-    backgroundWorker.submit(
-        new Callable<Void>() {
-          @Override
-          public Void call() throws Exception {
-            final String currentSessionId = getCurrentSessionId();
-            new MetaDataStore(fileStore).writeKeyData(currentSessionId, keyData, isInternal);
-            return null;
-          }
-        });
   }
 
   // endregion
@@ -504,12 +493,12 @@ class CrashlyticsController {
   // region Session Management
 
   /** Open a new session on the single-threaded executor. */
-  void openSession() {
+  void openSession(String sessionIdentifier) {
     backgroundWorker.submit(
         new Callable<Void>() {
           @Override
           public Void call() throws Exception {
-            doOpenSession();
+            doOpenSession(sessionIdentifier, /*isOnDemand=*/ false);
             return null;
           }
         });
@@ -535,9 +524,9 @@ class CrashlyticsController {
    * <p>This method can not be called while the {@link CrashlyticsCore} settings lock is held. It
    * will result in a deadlock!
    *
-   * @param settingsDataProvider
+   * @param settingsProvider
    */
-  boolean finalizeSessions(SettingsDataProvider settingsDataProvider) {
+  boolean finalizeSessions(SettingsProvider settingsProvider) {
     backgroundWorker.checkRunningOnThread();
 
     if (isHandlingException()) {
@@ -547,7 +536,7 @@ class CrashlyticsController {
 
     Logger.getLogger().v("Finalizing previously open sessions.");
     try {
-      doCloseSessions(true, settingsDataProvider);
+      doCloseSessions(true, settingsProvider);
     } catch (Exception e) {
       Logger.getLogger().e("Unable to finalize previously open sessions.", e);
       return false;
@@ -561,9 +550,8 @@ class CrashlyticsController {
    * Not synchronized/locked. Must be executed from the single thread executor service used by this
    * class.
    */
-  private void doOpenSession() {
+  private void doOpenSession(String sessionIdentifier, Boolean isOnDemand) {
     final long startedAtSeconds = getCurrentTimestampSeconds();
-    final String sessionIdentifier = new CLSUUID(idManager).toString();
 
     Logger.getLogger().d("Opening a new session with ID " + sessionIdentifier);
 
@@ -571,8 +559,8 @@ class CrashlyticsController {
         String.format(Locale.US, GENERATOR_FORMAT, CrashlyticsCore.getVersion());
 
     StaticSessionData.AppData appData = createAppData(idManager, this.appData);
-    StaticSessionData.OsData osData = createOsData(getContext());
-    StaticSessionData.DeviceData deviceData = createDeviceData(getContext());
+    StaticSessionData.OsData osData = createOsData();
+    StaticSessionData.DeviceData deviceData = createDeviceData(context);
 
     nativeComponent.prepareNativeSession(
         sessionIdentifier,
@@ -580,20 +568,28 @@ class CrashlyticsController {
         startedAtSeconds,
         StaticSessionData.create(appData, osData, deviceData));
 
+    // If is on-demand fatal, we need to update the session id for userMetadata
+    // as well(since we don't really change the object to a new one for a new session).
+    // all the information in the previous session is still in memory, but we do need to
+    // manually writing them into persistence for the new session.
+    if (isOnDemand && sessionIdentifier != null) {
+      userMetadata.setNewSession(sessionIdentifier);
+    }
+
     logFileManager.setCurrentSession(sessionIdentifier);
+    sessionsSubscriber.setSessionId(sessionIdentifier);
     reportingCoordinator.onBeginSession(sessionIdentifier, startedAtSeconds);
   }
 
-  void doCloseSessions(SettingsDataProvider settingsDataProvider) {
-    doCloseSessions(false, settingsDataProvider);
+  void doCloseSessions(SettingsProvider settingsProvider) {
+    doCloseSessions(false, settingsProvider);
   }
 
   /**
    * Not synchronized/locked. Must be executed from the single thread executor service used by this
    * class.
    */
-  private void doCloseSessions(
-      boolean skipCurrentSession, SettingsDataProvider settingsDataProvider) {
+  private void doCloseSessions(boolean skipCurrentSession, SettingsProvider settingsProvider) {
     final int offset = skipCurrentSession ? 1 : 0;
 
     // :TODO HW2021 this implementation can be cleaned up.
@@ -607,7 +603,7 @@ class CrashlyticsController {
 
     final String mostRecentSessionIdToClose = sortedOpenSessions.get(offset);
 
-    if (settingsDataProvider.getSettings().getFeaturesData().collectAnrs) {
+    if (settingsProvider.getSettingsSync().featureFlagData.collectAnrs) {
       writeApplicationExitInfoEventIfRelevant(mostRecentSessionIdToClose);
     } else {
       Logger.getLogger().v("ANR feature disabled.");
@@ -622,6 +618,14 @@ class CrashlyticsController {
     String currentSessionId = null;
     if (skipCurrentSession) {
       currentSessionId = sortedOpenSessions.get(0);
+    } else {
+      // The Sessions SDK can rotate the AQS session id independently of the Crashlytics session.
+      // There is a window of time between Crashlytics closing the current session and opening a
+      // new session when the Sessions SDK is able to rotate the AQS session id. For such cases it
+      // is necessary to clear the current Crashlytics session id from the Sessions subscriber in
+      // order to prevent the newly rotated AQS session id from being associated with the closed
+      // Crashlytics session. On-demand fatals is an example of where this can happen.
+      sessionsSubscriber.setSessionId(/* sessionId= */ null);
     }
 
     reportingCoordinator.finalizeSessions(getCurrentTimestampSeconds(), currentSessionId);
@@ -633,15 +637,69 @@ class CrashlyticsController {
     return fileStore.getCommonFiles(APP_EXCEPTION_MARKER_FILTER);
   }
 
+  void saveVersionControlInfo() {
+    try {
+      String versionControlInfo = getVersionControlInfo();
+      if (versionControlInfo != null) {
+        setInternalKey(VERSION_CONTROL_INFO_KEY, versionControlInfo);
+        Logger.getLogger().i("Saved version control info");
+      }
+    } catch (IOException e) {
+      Logger.getLogger().w("Unable to save version control info", e);
+    }
+  }
+
+  String getVersionControlInfo() throws IOException {
+    InputStream is = getResourceAsStream(META_INF_FOLDER + VERSION_CONTROL_INFO_FILE);
+    if (is == null) {
+      return null;
+    }
+
+    Logger.getLogger().d("Read version control info");
+    return Base64.encodeToString(readResource(is), 0);
+  }
+
+  private InputStream getResourceAsStream(String resource) {
+    ClassLoader classLoader = this.getClass().getClassLoader();
+    if (classLoader == null) {
+      Logger.getLogger().w("Couldn't get Class Loader");
+      return null;
+    }
+
+    InputStream is = classLoader.getResourceAsStream(resource);
+    if (is == null) {
+      Logger.getLogger().i("No version control information found");
+      return null;
+    }
+
+    return is;
+  }
+
+  private static byte[] readResource(InputStream is) throws IOException {
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    byte[] buffer = new byte[1024];
+    int length;
+
+    while ((length = is.read(buffer)) != -1) {
+      out.write(buffer, 0, length);
+    }
+
+    return out.toByteArray();
+  }
+
   private void finalizePreviousNativeSession(String previousSessionId) {
     Logger.getLogger().v("Finalizing native report for session " + previousSessionId);
     NativeSessionFileProvider nativeSessionFileProvider =
         nativeComponent.getSessionFileProvider(previousSessionId);
     File minidumpFile = nativeSessionFileProvider.getMinidumpFile();
-    if (minidumpFile == null || !minidumpFile.exists()) {
-      Logger.getLogger().w("No minidump data found for session " + previousSessionId);
+    CrashlyticsReport.ApplicationExitInfo applicationExitInfo =
+        nativeSessionFileProvider.getApplicationExitInto();
+
+    if (nativeCoreAbsent(previousSessionId, minidumpFile, applicationExitInfo)) {
+      Logger.getLogger().w("No native core present");
       return;
     }
+
     // Because we don't want to read the minidump to get its timestamp, just use file creation time.
     final long eventTime = minidumpFile.lastModified();
 
@@ -665,8 +723,24 @@ class CrashlyticsController {
 
     Logger.getLogger().d("CrashlyticsController#finalizePreviousNativeSession");
 
-    reportingCoordinator.finalizeSessionWithNativeEvent(previousSessionId, nativeSessionFiles);
+    reportingCoordinator.finalizeSessionWithNativeEvent(
+        previousSessionId, nativeSessionFiles, applicationExitInfo);
     previousSessionLogManager.clearLog();
+  }
+
+  private static boolean nativeCoreAbsent(
+      String previousSessionId,
+      File minidumpFile,
+      CrashlyticsReport.ApplicationExitInfo applicationExitInfo) {
+    if (minidumpFile == null || !minidumpFile.exists()) {
+      Logger.getLogger().w("No minidump data found for session " + previousSessionId);
+    }
+
+    if (applicationExitInfo == null) {
+      Logger.getLogger().i("No Tombstones data found for session " + previousSessionId);
+    }
+
+    return (minidumpFile == null || !minidumpFile.exists()) && applicationExitInfo == null;
   }
 
   private static long getCurrentTimestampSeconds() {
@@ -694,15 +768,14 @@ class CrashlyticsController {
         idManager.getAppIdentifier(),
         appData.versionCode,
         appData.versionName,
-        idManager.getCrashlyticsInstallId(),
+        idManager.getInstallIds().getCrashlyticsInstallId(),
         DeliveryMechanism.determineFrom(appData.installerPackageName).getId(),
-        appData.developmentPlatform,
-        appData.developmentPlatformVersion);
+        appData.developmentPlatformProvider);
   }
 
-  private static StaticSessionData.OsData createOsData(Context context) {
+  private static StaticSessionData.OsData createOsData() {
     return StaticSessionData.OsData.create(
-        VERSION.RELEASE, VERSION.CODENAME, CommonUtils.isRooted(context));
+        VERSION.RELEASE, VERSION.CODENAME, CommonUtils.isRooted());
   }
 
   private static StaticSessionData.DeviceData createDeviceData(Context context) {
@@ -713,10 +786,10 @@ class CrashlyticsController {
         CommonUtils.getCpuArchitectureInt(),
         Build.MODEL,
         Runtime.getRuntime().availableProcessors(),
-        CommonUtils.getTotalRamInBytes(),
+        CommonUtils.calculateTotalRamInBytes(context),
         diskSpace,
-        CommonUtils.isEmulator(context),
-        CommonUtils.getDeviceState(context),
+        CommonUtils.isEmulator(),
+        CommonUtils.getDeviceState(),
         Build.MANUFACTURER,
         Build.PRODUCT);
   }
@@ -731,10 +804,6 @@ class CrashlyticsController {
 
   boolean isHandlingException() {
     return crashHandler != null && crashHandler.isHandlingException();
-  }
-
-  FileStore getFileStore() {
-    return fileStore;
   }
 
   /**
@@ -767,6 +836,9 @@ class CrashlyticsController {
       return Tasks.forResult(null);
     }
     Logger.getLogger().d("Logging app exception event to Firebase Analytics");
+
+    // TODO(b/258263226): Migrate to go/firebase-android-executors
+    @SuppressLint("ThreadPoolCreation")
     final ThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(1);
     return Tasks.call(
         executor,
@@ -806,9 +878,12 @@ class CrashlyticsController {
       FileStore fileStore,
       byte[] logBytes) {
 
-    final MetaDataStore metaDataStore = new MetaDataStore(fileStore);
-    final File userFile = metaDataStore.getUserDataFileForSession(previousSessionId);
-    final File keysFile = metaDataStore.getKeysFileForSession(previousSessionId);
+    final File userFile =
+        fileStore.getSessionFile(previousSessionId, UserMetadata.USERDATA_FILENAME);
+    final File keysFile =
+        fileStore.getSessionFile(previousSessionId, UserMetadata.KEYDATA_FILENAME);
+    final File rolloutsFile =
+        fileStore.getSessionFile(previousSessionId, UserMetadata.ROLLOUTS_STATE_FILENAME);
 
     List<NativeSessionFile> nativeSessionFiles = new ArrayList<>();
     nativeSessionFiles.add(new BytesBackedNativeSessionFile("logs_file", "logs", logBytes));
@@ -825,12 +900,20 @@ class CrashlyticsController {
             "device_meta_file", "device", fileProvider.getDeviceFile()));
     nativeSessionFiles.add(
         new FileBackedNativeSessionFile("os_meta_file", "os", fileProvider.getOsFile()));
-    nativeSessionFiles.add(
-        new FileBackedNativeSessionFile(
-            "minidump_file", "minidump", fileProvider.getMinidumpFile()));
+    nativeSessionFiles.add(nativeCoreFile(fileProvider));
     nativeSessionFiles.add(new FileBackedNativeSessionFile("user_meta_file", "user", userFile));
     nativeSessionFiles.add(new FileBackedNativeSessionFile("keys_file", "keys", keysFile));
+    nativeSessionFiles.add(
+        new FileBackedNativeSessionFile("rollouts_file", "rollouts", rolloutsFile));
     return nativeSessionFiles;
+  }
+
+  private static NativeSessionFile nativeCoreFile(NativeSessionFileProvider fileProvider) {
+    File minidump = fileProvider.getMinidumpFile();
+
+    return minidump == null || !minidump.exists()
+        ? new BytesBackedNativeSessionFile("minidump_file", "minidump", new byte[] {0})
+        : new FileBackedNativeSessionFile("minidump_file", "minidump", minidump);
   }
 
   // endregion
@@ -850,8 +933,8 @@ class CrashlyticsController {
       // happened during the session.
       if (applicationExitInfoList.size() != 0) {
         final LogFileManager relevantSessionLogManager = new LogFileManager(fileStore, sessionId);
-        final UserMetadata relevantUserMetadata = new UserMetadata();
-        relevantUserMetadata.setCustomKeys(new MetaDataStore(fileStore).readKeyData(sessionId));
+        final UserMetadata relevantUserMetadata =
+            UserMetadata.loadFromExistingSession(sessionId, fileStore, backgroundWorker);
         reportingCoordinator.persistRelevantAppExitInfoEvent(
             sessionId, applicationExitInfoList, relevantSessionLogManager, relevantUserMetadata);
       } else {

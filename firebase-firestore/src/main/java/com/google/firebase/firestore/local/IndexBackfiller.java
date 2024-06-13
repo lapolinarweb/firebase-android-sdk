@@ -14,24 +14,15 @@
 
 package com.google.firebase.firestore.local;
 
-import static com.google.firebase.firestore.util.Assert.hardAssert;
-
 import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
-import com.google.firebase.database.collection.ImmutableSortedMap;
-import com.google.firebase.firestore.core.Query;
+import com.google.common.base.Supplier;
 import com.google.firebase.firestore.model.Document;
 import com.google.firebase.firestore.model.DocumentKey;
-import com.google.firebase.firestore.model.FieldIndex;
 import com.google.firebase.firestore.model.FieldIndex.IndexOffset;
-import com.google.firebase.firestore.model.ResourcePath;
 import com.google.firebase.firestore.util.AsyncQueue;
 import com.google.firebase.firestore.util.Logger;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -49,27 +40,30 @@ public class IndexBackfiller {
 
   private final Scheduler scheduler;
   private final Persistence persistence;
-  private final RemoteDocumentCache remoteDocumentCache;
-  private LocalDocumentsView localDocumentsView;
-  private IndexManager indexManager;
+  private final Supplier<IndexManager> indexManagerOfCurrentUser;
+  private final Supplier<LocalDocumentsView> localDocumentsViewOfCurrentUser;
   private int maxDocumentsToProcess = MAX_DOCUMENTS_TO_PROCESS;
 
-  public IndexBackfiller(Persistence persistence, AsyncQueue asyncQueue) {
+  public IndexBackfiller(Persistence persistence, AsyncQueue asyncQueue, LocalStore localStore) {
+    this(
+        persistence,
+        asyncQueue,
+        localStore::getIndexManagerForCurrentUser,
+        localStore::getLocalDocumentsForCurrentUser);
+  }
+
+  public IndexBackfiller(
+      Persistence persistence,
+      AsyncQueue asyncQueue,
+      Supplier<IndexManager> indexManagerOfCurrentUser,
+      Supplier<LocalDocumentsView> localDocumentsViewOfCurrentUser) {
     this.persistence = persistence;
     this.scheduler = new Scheduler(asyncQueue);
-    this.remoteDocumentCache = persistence.getRemoteDocumentCache();
-  }
-
-  public void setLocalDocumentsView(LocalDocumentsView localDocumentsView) {
-    this.localDocumentsView = localDocumentsView;
-  }
-
-  public void setIndexManager(IndexManager indexManager) {
-    this.indexManager = indexManager;
+    this.indexManagerOfCurrentUser = indexManagerOfCurrentUser;
+    this.localDocumentsViewOfCurrentUser = localDocumentsViewOfCurrentUser;
   }
 
   public class Scheduler implements com.google.firebase.firestore.local.Scheduler {
-    private boolean hasRun = false;
     @Nullable private AsyncQueue.DelayedTask backfillTask;
     private final AsyncQueue asyncQueue;
 
@@ -79,20 +73,17 @@ public class IndexBackfiller {
 
     @Override
     public void start() {
-      hardAssert(Persistence.INDEXING_SUPPORT_ENABLED, "Indexing support not enabled");
-      scheduleBackfill();
+      scheduleBackfill(INITIAL_BACKFILL_DELAY_MS);
     }
 
     @Override
     public void stop() {
-      hardAssert(Persistence.INDEXING_SUPPORT_ENABLED, "Indexing support not enabled");
       if (backfillTask != null) {
         backfillTask.cancel();
       }
     }
 
-    private void scheduleBackfill() {
-      long delay = hasRun ? REGULAR_BACKFILL_DELAY_MS : INITIAL_BACKFILL_DELAY_MS;
+    private void scheduleBackfill(long delay) {
       backfillTask =
           asyncQueue.enqueueAfterDelay(
               AsyncQueue.TimerId.INDEX_BACKFILL,
@@ -100,8 +91,7 @@ public class IndexBackfiller {
               () -> {
                 int documentsProcessed = backfill();
                 Logger.debug(LOG_TAG, "Documents written: %s", documentsProcessed);
-                hasRun = true;
-                scheduleBackfill();
+                scheduleBackfill(REGULAR_BACKFILL_DELAY_MS);
               });
     }
   }
@@ -112,14 +102,12 @@ public class IndexBackfiller {
 
   /** Runs a single backfill operation and returns the number of documents processed. */
   public int backfill() {
-    hardAssert(localDocumentsView != null, "setLocalDocumentsView() not called");
-    hardAssert(indexManager != null, "setIndexManager() not called");
-    return persistence.runTransaction(
-        "Backfill Indexes", () -> writeIndexEntries(localDocumentsView));
+    return persistence.runTransaction("Backfill Indexes", () -> this.writeIndexEntries());
   }
 
   /** Writes index entries until the cap is reached. Returns the number of documents processed. */
-  private int writeIndexEntries(LocalDocumentsView localDocumentsView) {
+  private int writeIndexEntries() {
+    IndexManager indexManager = indexManagerOfCurrentUser.get();
     Set<String> processedCollectionGroups = new HashSet<>();
     int documentsRemaining = maxDocumentsToProcess;
     while (documentsRemaining > 0) {
@@ -128,77 +116,47 @@ public class IndexBackfiller {
         break;
       }
       Logger.debug(LOG_TAG, "Processing collection: %s", collectionGroup);
-      documentsRemaining -=
-          writeEntriesForCollectionGroup(localDocumentsView, collectionGroup, documentsRemaining);
+      documentsRemaining -= writeEntriesForCollectionGroup(collectionGroup, documentsRemaining);
       processedCollectionGroups.add(collectionGroup);
     }
     return maxDocumentsToProcess - documentsRemaining;
   }
 
-  /** Writes entries for the fetched field indexes. */
+  /**
+   * Writes entries for the provided collection group. Returns the number of documents processed.
+   */
   private int writeEntriesForCollectionGroup(
-      LocalDocumentsView localDocumentsView, String collectionGroup, int entriesRemainingUnderCap) {
-    Query query = new Query(ResourcePath.EMPTY, collectionGroup);
-
+      String collectionGroup, int documentsRemainingUnderCap) {
+    IndexManager indexManager = indexManagerOfCurrentUser.get();
+    LocalDocumentsView localDocumentsView = localDocumentsViewOfCurrentUser.get();
     // Use the earliest offset of all field indexes to query the local cache.
-    IndexOffset existingOffset = getExistingOffset(indexManager.getFieldIndexes(collectionGroup));
+    IndexOffset existingOffset = indexManager.getMinOffset(collectionGroup);
 
-    // TODO(indexing): Use limit queries to only fetch the required number of entries.
-    // TODO(indexing): Support mutation batch Ids when sorting and writing indexes.
-    ImmutableSortedMap<DocumentKey, Document> documents =
-        localDocumentsView.getDocumentsMatchingQuery(query, existingOffset);
+    LocalDocumentsResult nextBatch =
+        localDocumentsView.getNextDocuments(
+            collectionGroup, existingOffset, documentsRemainingUnderCap);
+    indexManager.updateIndexEntries(nextBatch.getDocuments());
 
-    List<Document> oldestDocuments = getOldestDocuments(documents, entriesRemainingUnderCap);
-    indexManager.updateIndexEntries(oldestDocuments);
-
-    IndexOffset newOffset = getNewOffset(oldestDocuments, existingOffset);
+    IndexOffset newOffset = getNewOffset(existingOffset, nextBatch);
+    Logger.debug(LOG_TAG, "Updating offset: %s", newOffset);
     indexManager.updateCollectionGroup(collectionGroup, newOffset);
-    return oldestDocuments.size();
+
+    return nextBatch.getDocuments().size();
   }
 
-  /** Returns the lowest offset for the provided index group. */
-  private IndexOffset getExistingOffset(Collection<FieldIndex> fieldIndexes) {
-    IndexOffset lowestOffset = null;
-    for (FieldIndex fieldIndex : fieldIndexes) {
-      if (lowestOffset == null
-          || fieldIndex.getIndexState().getOffset().compareTo(lowestOffset) < 0) {
-        lowestOffset = fieldIndex.getIndexState().getOffset();
+  /** Returns the next offset based on the provided documents. */
+  private IndexOffset getNewOffset(IndexOffset existingOffset, LocalDocumentsResult lookupResult) {
+    IndexOffset maxOffset = existingOffset;
+    for (Map.Entry<DocumentKey, Document> entry : lookupResult.getDocuments()) {
+      IndexOffset newOffset = IndexOffset.fromDocument(entry.getValue());
+      if (newOffset.compareTo(maxOffset) > 0) {
+        maxOffset = newOffset;
       }
     }
-    return lowestOffset == null ? IndexOffset.NONE : lowestOffset;
-  }
-
-  /**
-   * Returns the offset for the index based on the newly indexed documents.
-   *
-   * @param documents a list of documents sorted by read time and key (ascending)
-   * @param currentOffset the current offset of the index group
-   */
-  private IndexOffset getNewOffset(List<Document> documents, IndexOffset currentOffset) {
-    IndexOffset latestOffset =
-        documents.isEmpty()
-            ? IndexOffset.create(remoteDocumentCache.getLatestReadTime())
-            : IndexOffset.create(
-                documents.get(documents.size() - 1).getReadTime(),
-                documents.get(documents.size() - 1).getKey());
-    // Make sure the index does not go back in time
-    latestOffset = latestOffset.compareTo(currentOffset) > 0 ? latestOffset : currentOffset;
-    return latestOffset;
-  }
-
-  /** Returns up to {@code count} documents sorted by read time and key. */
-  private List<Document> getOldestDocuments(
-      ImmutableSortedMap<DocumentKey, Document> documents, int count) {
-    List<Document> oldestDocuments = new ArrayList<>();
-    for (Map.Entry<DocumentKey, Document> entry : documents) {
-      oldestDocuments.add(entry.getValue());
-    }
-    Collections.sort(
-        oldestDocuments,
-        (l, r) ->
-            IndexOffset.create(l.getReadTime(), l.getKey())
-                .compareTo(IndexOffset.create(r.getReadTime(), r.getKey())));
-    return oldestDocuments.subList(0, Math.min(count, oldestDocuments.size()));
+    return IndexOffset.create(
+        maxOffset.getReadTime(),
+        maxOffset.getDocumentKey(),
+        Math.max(lookupResult.getBatchId(), existingOffset.getLargestBatchId()));
   }
 
   @VisibleForTesting

@@ -17,13 +17,14 @@ package com.google.firebase.crashlytics.internal.persistence;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import com.google.firebase.crashlytics.internal.Logger;
+import com.google.firebase.crashlytics.internal.common.CrashlyticsAppQualitySessionsSubscriber;
 import com.google.firebase.crashlytics.internal.common.CrashlyticsReportWithSessionId;
+import com.google.firebase.crashlytics.internal.metadata.UserMetadata;
 import com.google.firebase.crashlytics.internal.model.CrashlyticsReport;
 import com.google.firebase.crashlytics.internal.model.CrashlyticsReport.Session;
 import com.google.firebase.crashlytics.internal.model.CrashlyticsReport.Session.Event;
-import com.google.firebase.crashlytics.internal.model.ImmutableList;
 import com.google.firebase.crashlytics.internal.model.serialization.CrashlyticsReportJsonTransform;
-import com.google.firebase.crashlytics.internal.settings.SettingsDataProvider;
+import com.google.firebase.crashlytics.internal.settings.SettingsProvider;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -54,7 +55,6 @@ public class CrashlyticsReportPersistence {
   private static final int MAX_OPEN_SESSIONS = 8;
 
   private static final String REPORT_FILE_NAME = "report";
-  private static final String USER_ID_FILE_NAME = "user-id";
   // We use the lastModified timestamp of this file to quickly store and access the startTime in ms
   // of a session.
   private static final String SESSION_START_TIMESTAMP_FILE_NAME = "start-time";
@@ -78,13 +78,16 @@ public class CrashlyticsReportPersistence {
   private final AtomicInteger eventCounter = new AtomicInteger(0);
 
   private final FileStore fileStore;
-
-  @NonNull private final SettingsDataProvider settingsDataProvider;
+  private final SettingsProvider settingsProvider;
+  private final CrashlyticsAppQualitySessionsSubscriber sessionsSubscriber;
 
   public CrashlyticsReportPersistence(
-      FileStore fileStore, SettingsDataProvider settingsDataProvider) {
+      FileStore fileStore,
+      SettingsProvider settingsProvider,
+      CrashlyticsAppQualitySessionsSubscriber sessionsSubscriber) {
     this.fileStore = fileStore;
-    this.settingsDataProvider = settingsDataProvider;
+    this.settingsProvider = settingsProvider;
+    this.sessionsSubscriber = sessionsSubscriber;
   }
 
   public void persistReport(@NonNull CrashlyticsReport report) {
@@ -123,30 +126,22 @@ public class CrashlyticsReportPersistence {
    *
    * <p>Only a certain number of normal priority events are stored per-session. When this maximum is
    * reached, the oldest events will be dropped. High priority events are not subject to this limit.
+   *
+   * <p>Also persists the current app quality sessions session id.
    */
   public void persistEvent(
       @NonNull CrashlyticsReport.Session.Event event,
       @NonNull String sessionId,
       boolean isHighPriority) {
-    int maxEventsToKeep =
-        settingsDataProvider.getSettings().getSessionData().maxCustomExceptionEvents;
+    int maxEventsToKeep = settingsProvider.getSettingsSync().sessionData.maxCustomExceptionEvents;
     final String json = TRANSFORM.eventToJson(event);
     final String fileName = generateEventFilename(eventCounter.getAndIncrement(), isHighPriority);
     try {
       writeTextFile(fileStore.getSessionFile(sessionId, fileName), json);
-    } catch (IOException e) {
-      Logger.getLogger().w("Could not persist event for session " + sessionId, e);
+    } catch (IOException ex) {
+      Logger.getLogger().w("Could not persist event for session " + sessionId, ex);
     }
     trimEvents(sessionId, maxEventsToKeep);
-  }
-
-  public void persistUserIdForSession(@NonNull String userId, @NonNull String sessionId) {
-    try {
-      writeTextFile(fileStore.getSessionFile(sessionId, USER_ID_FILE_NAME), userId);
-    } catch (IOException e) {
-      // Session directory is not guaranteed to exist
-      Logger.getLogger().w("Could not persist user ID for session " + sessionId, e);
-    }
   }
 
   /**
@@ -205,11 +200,13 @@ public class CrashlyticsReportPersistence {
   }
 
   public void finalizeSessionWithNativeEvent(
-      String previousSessionId, CrashlyticsReport.FilesPayload ndkPayload) {
+      String previousSessionId,
+      CrashlyticsReport.FilesPayload ndkPayload,
+      CrashlyticsReport.ApplicationExitInfo applicationExitInfo) {
     final File reportFile = fileStore.getSessionFile(previousSessionId, REPORT_FILE_NAME);
     Logger.getLogger()
         .d("Writing native session report for " + previousSessionId + " to file: " + reportFile);
-    synthesizeNativeReportFile(reportFile, ndkPayload, previousSessionId);
+    synthesizeNativeReportFile(reportFile, ndkPayload, previousSessionId, applicationExitInfo);
   }
 
   /**
@@ -234,9 +231,7 @@ public class CrashlyticsReportPersistence {
   }
 
   private SortedSet<String> capAndGetOpenSessions(@Nullable String currentSessionId) {
-
-    // Fixes b/195664514
-    fileStore.cleanupLegacyFiles();
+    fileStore.cleanupPreviousFileSystems();
 
     SortedSet<String> openSessionIds = getOpenSessionIds();
     if (currentSessionId != null) {
@@ -257,8 +252,7 @@ public class CrashlyticsReportPersistence {
   }
 
   private void capFinalizedReports() {
-    int maxReportsToKeep =
-        settingsDataProvider.getSettings().getSessionData().maxCompleteSessionsCount;
+    int maxReportsToKeep = settingsProvider.getSettingsSync().sessionData.maxCompleteSessionsCount;
     List<File> finalizedReportFiles = getAllFinalizedReportFiles();
 
     int fileCount = finalizedReportFiles.size();
@@ -321,27 +315,27 @@ public class CrashlyticsReportPersistence {
       return;
     }
 
-    String userId = null;
-    final File userIdFile = fileStore.getSessionFile(sessionId, USER_ID_FILE_NAME);
-    if (userIdFile.isFile()) {
-      try {
-        userId = readTextFile(userIdFile);
-      } catch (IOException e) {
-        Logger.getLogger().w("Could not read user ID file in " + sessionId, e);
-      }
-    }
+    String userId = UserMetadata.readUserId(sessionId, fileStore);
+    String appQualitySessionId = sessionsSubscriber.getAppQualitySessionId(sessionId);
 
-    final File reportFile = fileStore.getSessionFile(sessionId, REPORT_FILE_NAME);
-    synthesizeReportFile(reportFile, events, sessionEndTime, isHighPriorityReport, userId);
+    File reportFile = fileStore.getSessionFile(sessionId, REPORT_FILE_NAME);
+    synthesizeReportFile(
+        reportFile, events, sessionEndTime, isHighPriorityReport, userId, appQualitySessionId);
   }
 
   private void synthesizeNativeReportFile(
       @NonNull File reportFile,
       @NonNull CrashlyticsReport.FilesPayload ndkPayload,
-      @NonNull String previousSessionId) {
+      @NonNull String previousSessionId,
+      CrashlyticsReport.ApplicationExitInfo applicationExitInfo) {
+    String appQualitySessionId = sessionsSubscriber.getAppQualitySessionId(previousSessionId);
     try {
       final CrashlyticsReport report =
-          TRANSFORM.reportFromJson(readTextFile(reportFile)).withNdkPayload(ndkPayload);
+          TRANSFORM
+              .reportFromJson(readTextFile(reportFile))
+              .withNdkPayload(ndkPayload)
+              .withApplicationExitInfo(applicationExitInfo)
+              .withAppQualitySessionId(appQualitySessionId);
 
       writeTextFile(fileStore.getNativeReport(previousSessionId), TRANSFORM.reportToJson(report));
     } catch (IOException e) {
@@ -354,19 +348,23 @@ public class CrashlyticsReportPersistence {
       @NonNull List<Event> events,
       long sessionEndTime,
       boolean isHighPriorityReport,
-      @Nullable String userId) {
+      @Nullable String userId,
+      @Nullable String appQualitySessionId) {
     try {
       CrashlyticsReport report =
           TRANSFORM
               .reportFromJson(readTextFile(reportFile))
               .withSessionEndFields(sessionEndTime, isHighPriorityReport, userId)
-              .withEvents(ImmutableList.from(events));
+              .withAppQualitySessionId(appQualitySessionId)
+              .withEvents(events);
       final Session session = report.getSession();
 
       if (session == null) {
         // This shouldn't happen, but is a valid state for NDK-based reports
         return;
       }
+
+      Logger.getLogger().d("appQualitySessionId: " + appQualitySessionId);
 
       File finalizedReportFile =
           isHighPriorityReport

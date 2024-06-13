@@ -28,6 +28,7 @@ import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
 import com.google.android.datatransport.Encoding;
 import com.google.android.datatransport.Event;
+import com.google.android.datatransport.ProductData;
 import com.google.android.datatransport.TransportFactory;
 import com.google.android.gms.tasks.Tasks;
 import com.google.firebase.FirebaseApp;
@@ -43,7 +44,7 @@ import com.google.firebase.messaging.reporting.MessagingClientEventExtension;
 import java.util.concurrent.ExecutionException;
 
 /**
- * Provides integration between GCM and Scion.
+ * Provides integration between FCM and Scion.
  *
  * <p>All Scion dependencies should be kept in this class, and missing dependencies should be
  * handled gracefully. Instead of crashing the app if Scion has not been included in the APK we
@@ -70,6 +71,8 @@ public class MessagingAnalytics {
   private static final String DELIVERY_METRICS_EXPORT_TO_BIG_QUERY_PREF = "export_to_big_query";
   private static final String MANIFEST_DELIVERY_METRICS_EXPORT_TO_BIG_QUERY_ENABLED =
       "delivery_metrics_exported_to_big_query_enabled";
+
+  private static final int DEFAULT_PRODUCT_ID = 111881503;
 
   /** Log that a notification was received by the client app. */
   public static void logNotificationReceived(Intent intent) {
@@ -238,6 +241,13 @@ public class MessagingAnalytics {
    */
   @VisibleForTesting
   static void logToScion(String event, Bundle extras) {
+    try {
+      FirebaseApp.getInstance();
+    } catch (IllegalStateException e) {
+      Log.e(TAG, "Default FirebaseApp has not been initialized. Skip logging event to GA.");
+      return;
+    }
+
     if (extras == null) {
       extras = new Bundle();
     }
@@ -312,8 +322,8 @@ public class MessagingAnalytics {
   /**
    * Asynchronously log an event to Firelog.
    *
-   * <p>Firelog batch-send delivery metrics every 24 hours when the device is idle and have network
-   * connection in a background thread.
+   * <p>Firelog batch-send usually delivery metrics within 1 hour (at most 24 hours) when the device
+   * is idle and have network connection in a background thread.
    */
   private static void logToFirelog(
       MessagingClientEvent.Event event,
@@ -330,17 +340,21 @@ public class MessagingAnalytics {
 
     try {
       // TODO(b/145299499): offload encoding to Firelog Thread
+      ProductData productData =
+          ProductData.withProductId(
+              intent.getIntExtra(MessagePayloadKeys.PRODUCT_ID, DEFAULT_PRODUCT_ID));
       transportFactory
           .getTransport(
               FirelogAnalytics.FCM_LOG_SOURCE,
               MessagingClientEventExtension.class,
-              Encoding.of("src/main/proto"),
+              Encoding.of("proto"),
               MessagingClientEventExtension::toByteArray)
           .send(
-              Event.ofTelemetry(
+              Event.ofData(
                   MessagingClientEventExtension.newBuilder()
                       .setMessagingClientEvent(clientEvent)
-                      .build()));
+                      .build(),
+                  productData));
     } catch (RuntimeException e) {
       Log.w(TAG, "Failed to send big query analytics payload.", e);
     }

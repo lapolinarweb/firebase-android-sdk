@@ -15,14 +15,15 @@
 package com.google.firebase.firestore.local;
 
 import androidx.annotation.Nullable;
+import com.google.firebase.database.collection.ImmutableSortedMap;
 import com.google.firebase.firestore.core.Target;
 import com.google.firebase.firestore.model.Document;
 import com.google.firebase.firestore.model.DocumentKey;
 import com.google.firebase.firestore.model.FieldIndex;
+import com.google.firebase.firestore.model.FieldIndex.IndexOffset;
 import com.google.firebase.firestore.model.ResourcePath;
 import java.util.Collection;
 import java.util.List;
-import java.util.Set;
 
 /**
  * Represents a set of indexes that are used to execute queries efficiently.
@@ -31,6 +32,21 @@ import java.util.Set;
  * Collection Group queries.
  */
 public interface IndexManager {
+  /** Represents the index state as it relates to a particular target. */
+  enum IndexType {
+    /** Indicates that no index could be found for serving the target. */
+    NONE,
+    /**
+     * Indicates that only a "partial index" could be found for serving the target. A partial index
+     * is one which does not have a segment for every filter/orderBy in the target.
+     */
+    PARTIAL,
+    /**
+     * Indicates that a "full index" could be found for serving the target. A full index is one
+     * which has a segment for every filter/orderBy in the target.
+     */
+    FULL
+  }
 
   /** Initializes the IndexManager. */
   void start();
@@ -62,6 +78,12 @@ public interface IndexManager {
   /** Removes the given field index and deletes all index values. */
   void deleteFieldIndex(FieldIndex index);
 
+  /** Removes all field indexes and deletes all index values. */
+  void deleteAllFieldIndexes();
+
+  /** Creates a full matched field index which serves the given target. */
+  void createTargetIndexes(Target target);
+
   /**
    * Returns a list of field indexes that correspond to the specified collection group.
    *
@@ -74,14 +96,22 @@ public interface IndexManager {
   Collection<FieldIndex> getFieldIndexes();
 
   /**
-   * Returns an index that can be used to serve the provided target. Returns {@code null} if no
-   * index is configured.
+   * Iterates over all field indexes that are used to serve the given target, and returns the
+   * minimum offset of them all. Asserts that the target can be served from index.
    */
-  @Nullable
-  FieldIndex getFieldIndex(Target target);
+  IndexOffset getMinOffset(Target target);
 
-  /** Returns the documents that match the given target based on the provided index. */
-  Set<DocumentKey> getDocumentsMatchingTarget(FieldIndex fieldIndex, Target target);
+  /** Returns the minimum offset for the given collection group. */
+  IndexOffset getMinOffset(String collectionGroup);
+
+  /** Returns the type of index (if any) that can be used to serve the given target */
+  IndexType getIndexType(Target target);
+
+  /**
+   * Returns the documents that match the given target based on the provided index or {@code null}
+   * if the query cannot be served from an index.
+   */
+  List<DocumentKey> getDocumentsMatchingTarget(Target target);
 
   /** Returns the next collection group to update. Returns {@code null} if no group exists. */
   @Nullable
@@ -97,5 +127,5 @@ public interface IndexManager {
   void updateCollectionGroup(String collectionGroup, FieldIndex.IndexOffset offset);
 
   /** Updates the index entries for the provided documents. */
-  void updateIndexEntries(Collection<Document> documents);
+  void updateIndexEntries(ImmutableSortedMap<DocumentKey, Document> documents);
 }

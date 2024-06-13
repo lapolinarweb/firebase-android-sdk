@@ -18,9 +18,9 @@ import static androidx.test.espresso.Espresso.onView;
 import static androidx.test.espresso.contrib.RecyclerViewActions.scrollToPosition;
 import static androidx.test.espresso.matcher.ViewMatchers.withId;
 
-import androidx.recyclerview.widget.RecyclerView;
+import androidx.test.core.app.ActivityScenario;
+import androidx.test.ext.junit.rules.ActivityScenarioRule;
 import androidx.test.filters.MediumTest;
-import androidx.test.rule.ActivityTestRule;
 import androidx.test.runner.AndroidJUnit4;
 import org.junit.Rule;
 import org.junit.Test;
@@ -33,23 +33,25 @@ import org.junit.runner.RunWith;
 @RunWith(AndroidJUnit4.class)
 @MediumTest
 public class FirebasePerformanceScreenTracesTest {
+  private static final int LAUNCH_TIMEOUT = 5000;
 
   @Rule
-  public ActivityTestRule<FirebasePerfScreenTracesActivity> activityRule =
-      new ActivityTestRule<>(
-          FirebasePerfScreenTracesActivity.class,
-          /* initialTouchMode= */ false,
-          /* launchActivity= */ true);
+  public ActivityScenarioRule<FirebasePerfScreenTracesActivity> activityRule =
+      new ActivityScenarioRule<>(FirebasePerfScreenTracesActivity.class);
 
   @Test
-  public void scrollRecyclerViewToEnd() {
-    RecyclerView recyclerView = activityRule.getActivity().findViewById(R.id.rv_numbers);
-    int itemCount = recyclerView.getAdapter().getItemCount();
+  public void scrollRecyclerViewToEnd() throws Exception {
+    ActivityScenario scenario = activityRule.getScenario();
+    int itemCount = FirebasePerfScreenTracesActivity.NUM_LIST_ITEMS;
     int currItemCount = 0;
 
     while (currItemCount < itemCount) {
       onView(withId(R.id.rv_numbers)).perform(scrollToPosition(currItemCount));
       currItemCount += 5;
     }
+    // End Activity screen trace by switching to another Activity
+    scenario.launch(FirebasePerfScreenTracesActivity.class);
+    // Default wait between flushes is 30s.
+    Thread.sleep(40 * 1000);
   }
 }

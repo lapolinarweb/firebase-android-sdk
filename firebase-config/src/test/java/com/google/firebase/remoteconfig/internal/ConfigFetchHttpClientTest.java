@@ -24,6 +24,7 @@ import static com.google.firebase.remoteconfig.RemoteConfigConstants.RequestFiel
 import static com.google.firebase.remoteconfig.RemoteConfigConstants.RequestFieldKey.APP_ID;
 import static com.google.firebase.remoteconfig.RemoteConfigConstants.RequestFieldKey.APP_VERSION;
 import static com.google.firebase.remoteconfig.RemoteConfigConstants.RequestFieldKey.COUNTRY_CODE;
+import static com.google.firebase.remoteconfig.RemoteConfigConstants.RequestFieldKey.FIRST_OPEN_TIME;
 import static com.google.firebase.remoteconfig.RemoteConfigConstants.RequestFieldKey.INSTANCE_ID;
 import static com.google.firebase.remoteconfig.RemoteConfigConstants.RequestFieldKey.INSTANCE_ID_TOKEN;
 import static com.google.firebase.remoteconfig.RemoteConfigConstants.RequestFieldKey.LANGUAGE_CODE;
@@ -33,7 +34,9 @@ import static com.google.firebase.remoteconfig.RemoteConfigConstants.RequestFiel
 import static com.google.firebase.remoteconfig.RemoteConfigConstants.RequestFieldKey.TIME_ZONE;
 import static com.google.firebase.remoteconfig.RemoteConfigConstants.ResponseFieldKey.ENTRIES;
 import static com.google.firebase.remoteconfig.RemoteConfigConstants.ResponseFieldKey.EXPERIMENT_DESCRIPTIONS;
+import static com.google.firebase.remoteconfig.RemoteConfigConstants.ResponseFieldKey.ROLLOUT_METADATA;
 import static com.google.firebase.remoteconfig.RemoteConfigConstants.ResponseFieldKey.STATE;
+import static com.google.firebase.remoteconfig.testutil.Assert.assertFalse;
 import static com.google.firebase.remoteconfig.testutil.Assert.assertThrows;
 import static org.mockito.MockitoAnnotations.initMocks;
 
@@ -124,7 +127,17 @@ public class ConfigFetchHttpClientTest {
                             .put("trigger_event", "event_trigger_1")
                             .put("experiment_start_time", "2017-10-30T21:46:40Z")
                             .put("trigger_timeout", "15552000s")
-                            .put("time_to_live", "7776000s")));
+                            .put("time_to_live", "7776000s")))
+            .put(
+                ROLLOUT_METADATA,
+                new JSONArray()
+                    .put(
+                        new JSONObject()
+                            .put("rolloutId", "1")
+                            .put("variantId", "A")
+                            .put(
+                                "affectedParameterKeys",
+                                new JSONArray().put("key_1").put("key_2"))));
     noChangeResponseBody = new JSONObject().put(STATE, "NO_CHANGE");
 
     fakeHttpURLConnection =
@@ -154,18 +167,22 @@ public class ConfigFetchHttpClientTest {
         .isEqualTo(hasChangeResponseBody.getJSONObject(ENTRIES).toString());
     assertThat(response.getFetchedConfigs().getAbtExperiments().toString())
         .isEqualTo(hasChangeResponseBody.getJSONArray(EXPERIMENT_DESCRIPTIONS).toString());
+    assertThat(response.getFetchedConfigs().getRolloutMetadata().toString())
+        .isEqualTo(hasChangeResponseBody.getJSONArray(ROLLOUT_METADATA).toString());
     assertThat(response.getFetchedConfigs().getFetchTime())
         .isEqualTo(new Date(mockClock.currentTimeMillis()));
   }
 
   @Test
-  public void fetch_noChange_responseNotSet() throws Exception {
+  public void fetch_noChange_responseOnlyContainsTemplateVersion() throws Exception {
     setServerResponseTo(noChangeResponseBody, SECOND_ETAG);
 
     FetchResponse response = fetch(SECOND_ETAG);
 
     assertThat(response.getLastFetchETag()).isNull();
-    assertThat(response.getFetchedConfigs()).isNull();
+    assertThat(response.getFetchedConfigs()).isNotNull();
+    assertThat(response.getFetchedConfigs().getTemplateVersionNumber()).isNotNull();
+    assertThat(response.getFetchedConfigs().getConfigs().length()).isEqualTo(0);
   }
 
   @Test
@@ -187,7 +204,7 @@ public class ConfigFetchHttpClientTest {
     // Custom user-defined headers.
     expectedHeaders.putAll(customHeaders);
 
-    fetch(FIRST_ETAG, /* userProperties= */ ImmutableMap.of(), customHeaders);
+    fetch(FIRST_ETAG, customHeaders);
 
     assertThat(fakeHttpURLConnection.getRequestHeaders()).isEqualTo(expectedHeaders);
   }
@@ -195,9 +212,13 @@ public class ConfigFetchHttpClientTest {
   @Test
   public void fetch_setsAllElementsOfRequestBody_sendsRequestBodyToServer() throws Exception {
     setServerResponseTo(noChangeResponseBody, SECOND_ETAG);
-    Map<String, String> userProperties = ImmutableMap.of("up1", "hello", "up2", "world");
+    Map<String, String> customUserProperties = ImmutableMap.of("up1", "hello", "up2", "world");
 
-    fetch(FIRST_ETAG, userProperties);
+    long firstOpenTimeEpochFromMillis = 1636146000000L;
+    // ISO-8601 value corresponding to 1636146000000 ms-from-epoch in UTC
+    String firstOpenTimeIsoString = "2021-11-05T21:00:00.000Z";
+
+    fetch(FIRST_ETAG, customUserProperties, firstOpenTimeEpochFromMillis);
 
     JSONObject requestBody = new JSONObject(fakeHttpURLConnection.getOutputStream().toString());
     assertThat(requestBody.get(INSTANCE_ID)).isEqualTo(INSTALLATION_ID_STRING);
@@ -215,8 +236,42 @@ public class ConfigFetchHttpClientTest {
         .isEqualTo(Long.toString(packageInfo.getLongVersionCode()));
     assertThat(requestBody.get(PACKAGE_NAME)).isEqualTo(context.getPackageName());
     assertThat(requestBody.get(SDK_VERSION)).isEqualTo(BuildConfig.VERSION_NAME);
+    assertThat(requestBody.get(FIRST_OPEN_TIME)).isEqualTo(firstOpenTimeIsoString);
     assertThat(requestBody.getJSONObject(ANALYTICS_USER_PROPERTIES).toString())
-        .isEqualTo(new JSONObject(userProperties).toString());
+        .isEqualTo(new JSONObject(customUserProperties).toString());
+  }
+
+  @Test
+  public void fetch_nullFirstOpenTime_fieldNotPresentInRequestBody() throws Exception {
+    setServerResponseTo(noChangeResponseBody, SECOND_ETAG);
+    Map<String, String> customUserProperties = ImmutableMap.of("up1", "hello", "up2", "world");
+
+    fetch(FIRST_ETAG, customUserProperties, null);
+
+    JSONObject requestBody = new JSONObject(fakeHttpURLConnection.getOutputStream().toString());
+
+    assertThat(requestBody.getJSONObject(ANALYTICS_USER_PROPERTIES).toString())
+        .isEqualTo(new JSONObject(customUserProperties).toString());
+    assertFalse(requestBody.has(FIRST_OPEN_TIME));
+  }
+
+  @Test
+  public void fetch_firstOpenTimeFromNonEnglishLanguageLocale_digitsInEnglishInRequestBody()
+      throws Exception {
+    String languageTag = "ar-AE"; // Language Tag for UAE Arabic
+    Locale.setDefault(Locale.forLanguageTag(languageTag));
+
+    setServerResponseTo(noChangeResponseBody, SECOND_ETAG);
+
+    Map<String, String> customUserProperties = ImmutableMap.of("up1", "hello", "up2", "world");
+    long firstOpenTimeEpochFromMillis = 1636146000000L;
+    // ISO-8601 value corresponding to 1636146000000 ms-from-epoch in UTC
+    String firstOpenTimeIsoString = "2021-11-05T21:00:00.000Z";
+
+    fetch(FIRST_ETAG, customUserProperties, firstOpenTimeEpochFromMillis);
+
+    JSONObject requestBody = new JSONObject(fakeHttpURLConnection.getOutputStream().toString());
+    assertThat(requestBody.get(FIRST_OPEN_TIME)).isEqualTo(firstOpenTimeIsoString);
   }
 
   @Test
@@ -226,27 +281,10 @@ public class ConfigFetchHttpClientTest {
 
     setServerResponseTo(noChangeResponseBody, SECOND_ETAG);
 
-    Map<String, String> userProperties = ImmutableMap.of("up1", "hello", "up2", "world");
-    fetch(FIRST_ETAG, userProperties);
+    fetch(FIRST_ETAG);
 
     JSONObject requestBody = new JSONObject(fakeHttpURLConnection.getOutputStream().toString());
     assertThat(requestBody.get(LANGUAGE_CODE)).isEqualTo(languageTag);
-  }
-
-  @Test
-  @Config(sdk = Build.VERSION_CODES.KITKAT /* 19 */)
-  public void fetch_localeUsesToStringBelowLollipop() throws Exception {
-    String languageTag = "zh-Hant-TW"; // Taiwan Chinese in traditional script
-    String languageString = "zh_TW_#Hant";
-    context.getResources().getConfiguration().setLocale(Locale.forLanguageTag(languageTag));
-
-    setServerResponseTo(noChangeResponseBody, SECOND_ETAG);
-
-    Map<String, String> userProperties = ImmutableMap.of("up1", "hello", "up2", "world");
-    fetch(FIRST_ETAG, userProperties);
-
-    JSONObject requestBody = new JSONObject(fakeHttpURLConnection.getOutputStream().toString());
-    assertThat(requestBody.get(LANGUAGE_CODE)).isEqualTo(languageString);
   }
 
   @Test
@@ -306,22 +344,11 @@ public class ConfigFetchHttpClientTest {
         /* analyticsUserProperties= */ ImmutableMap.of(),
         eTag,
         /* customHeaders= */ ImmutableMap.of(),
+        /* firstOpenTime= */ null,
         /* currentTime= */ new Date(mockClock.currentTimeMillis()));
   }
 
-  private FetchResponse fetch(String eTag, Map<String, String> userProperties) throws Exception {
-    return configFetchHttpClient.fetch(
-        fakeHttpURLConnection,
-        INSTALLATION_ID_STRING,
-        INSTALLATION_AUTH_TOKEN_STRING,
-        userProperties,
-        eTag,
-        /* customHeaders= */ ImmutableMap.of(),
-        new Date(mockClock.currentTimeMillis()));
-  }
-
-  private FetchResponse fetch(
-      String eTag, Map<String, String> userProperties, Map<String, String> customHeaders)
+  private FetchResponse fetch(String eTag, Map<String, String> userProperties, Long firstOpenTime)
       throws Exception {
     return configFetchHttpClient.fetch(
         fakeHttpURLConnection,
@@ -329,7 +356,20 @@ public class ConfigFetchHttpClientTest {
         INSTALLATION_AUTH_TOKEN_STRING,
         userProperties,
         eTag,
+        /* customHeaders= */ ImmutableMap.of(),
+        firstOpenTime,
+        new Date(mockClock.currentTimeMillis()));
+  }
+
+  private FetchResponse fetch(String eTag, Map<String, String> customHeaders) throws Exception {
+    return configFetchHttpClient.fetch(
+        fakeHttpURLConnection,
+        INSTALLATION_ID_STRING,
+        INSTALLATION_AUTH_TOKEN_STRING,
+        /* analyticsUserProperties= */ ImmutableMap.of(),
+        eTag,
         customHeaders,
+        /* firstOpenTime= */ null,
         new Date(mockClock.currentTimeMillis()));
   }
 
@@ -341,6 +381,7 @@ public class ConfigFetchHttpClientTest {
         /* analyticsUserProperties= */ ImmutableMap.of(),
         /* lastFetchETag= */ "bogus-etag",
         /* customHeaders= */ ImmutableMap.of(),
+        /* firstOpenTime= */ null,
         new Date(mockClock.currentTimeMillis()));
   }
 
@@ -352,6 +393,7 @@ public class ConfigFetchHttpClientTest {
         /* analyticsUserProperties= */ ImmutableMap.of(),
         /* lastFetchETag= */ "bogus-etag",
         /* customHeaders= */ ImmutableMap.of(),
+        /* firstOpenTime= */ null,
         new Date(mockClock.currentTimeMillis()));
   }
 

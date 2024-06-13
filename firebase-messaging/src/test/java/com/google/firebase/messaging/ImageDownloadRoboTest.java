@@ -22,11 +22,12 @@ import androidx.test.core.app.ApplicationProvider;
 import com.google.android.gms.tasks.Task;
 import com.google.android.gms.tasks.Tasks;
 import com.google.firebase.messaging.shadows.ShadowPreconditions;
+import com.google.firebase.messaging.test.R;
 import com.google.firebase.messaging.testing.TestImageServer;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.junit.Before;
@@ -46,7 +47,7 @@ public class ImageDownloadRoboTest {
 
   @Rule public TestImageServer testImageServer = new TestImageServer();
 
-  private Executor executor;
+  private ExecutorService executor;
 
   @Before
   public void setUp() throws IOException {

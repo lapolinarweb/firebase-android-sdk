@@ -14,7 +14,6 @@
 
 package com.google.firebase.firestore.local;
 
-import com.google.firebase.firestore.BuildConfig;
 import com.google.firebase.firestore.auth.User;
 import com.google.firebase.firestore.util.Supplier;
 
@@ -50,15 +49,8 @@ import com.google.firebase.firestore.util.Supplier;
 public abstract class Persistence {
   static final String TAG = Persistence.class.getSimpleName();
 
-  /** Temporary setting for enabling document overlays. */
-  // TODO(Overlay): Remove this.
-  public static boolean OVERLAY_SUPPORT_ENABLED = BuildConfig.ENABLE_OVERLAY;
   /** Constant string to indicate a data migration is required to support overlays. */
   public static String DATA_MIGRATION_BUILD_OVERLAYS = "BUILD_OVERLAYS";
-
-  /** Temporary setting for enabling indexing-specific code paths while in development. */
-  // TODO(Indexing): Remove this.
-  public static boolean INDEXING_SUPPORT_ENABLED = BuildConfig.ENABLE_INDEXING;
 
   // Local subclasses only, please.
   Persistence() {}
@@ -75,14 +67,15 @@ public abstract class Persistence {
 
   public abstract boolean isStarted();
 
-  abstract ReferenceDelegate getReferenceDelegate();
+  // Visible for testing purposes.
+  public abstract ReferenceDelegate getReferenceDelegate();
 
   /**
    * Returns a MutationQueue representing the persisted mutations for the given user.
    *
    * <p>Note: The implementation is free to return the same instance every time this is called for a
    * given user. In particular, the memory-backed implementation does this to emulate the persisted
-   * implementation to the extent possible (e.g. in the case of uid switching from
+   * implementation to the extent possible (for example, in the case of uid switching from
    * sally=>jack=>sally, sally's mutation queue will be preserved).
    */
   abstract MutationQueue getMutationQueue(User user, IndexManager indexManager);
@@ -100,7 +93,7 @@ public abstract class Persistence {
   abstract BundleCache getBundleCache();
 
   /** Returns a DocumentOverlayCache representing the documents that are mutated locally. */
-  abstract DocumentOverlayCache getDocumentOverlay(User user);
+  abstract DocumentOverlayCache getDocumentOverlayCache(User user);
 
   /** Returns a OverlayMigrationManager that runs any pending data migration required by SDK. */
   abstract OverlayMigrationManager getOverlayMigrationManager();

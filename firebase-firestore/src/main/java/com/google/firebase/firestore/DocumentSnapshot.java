@@ -102,7 +102,7 @@ public class DocumentSnapshot {
   /** @return The id of the document. */
   @NonNull
   public String getId() {
-    return key.getPath().getLastSegment();
+    return key.getDocumentId();
   }
 
   /** @return The metadata for this document snapshot. */
@@ -526,8 +526,10 @@ public class DocumentSnapshot {
     DocumentSnapshot other = (DocumentSnapshot) obj;
     return firestore.equals(other.firestore)
         && key.equals(other.key)
-        && (doc == null ? other.doc == null : doc.equals(other.doc))
-        && metadata.equals(other.metadata);
+        && metadata.equals(other.metadata)
+        && (doc == null
+            ? other.doc == null
+            : other.doc != null && doc.getData().equals(other.doc.getData()));
   }
 
   @Override
